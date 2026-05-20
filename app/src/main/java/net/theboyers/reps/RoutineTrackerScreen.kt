@@ -89,6 +89,7 @@ import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.runtime.getValue
@@ -125,6 +126,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.text.style.TextOverflow
 
 import androidx.compose.foundation.lazy.items
@@ -394,6 +396,10 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     var timerSecondsRemaining by rememberSaveable { mutableIntStateOf(0) }
     var workoutStartTimeMs    by rememberSaveable { mutableStateOf(0L) }
     var workoutEndTimeMs      by rememberSaveable { mutableStateOf(0L) }
+    // Wall-clock end times for timers — survives background correctly.
+    var stepEndTimeMs   by rememberSaveable { mutableStateOf(0L) }
+    var graceEndTimeMs  by rememberSaveable { mutableStateOf(0L) }
+    var pausedAtMs      by rememberSaveable { mutableStateOf(0L) }
 
     // Derived workout step sequence, rebuilt whenever entries or rest settings change.
     val workoutSteps = buildWorkoutSteps(routineEntries, routineRestBetweenExercisesSeconds)
@@ -431,6 +437,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     var themePreference              by rememberSaveable { mutableStateOf("system") }
     var defaultRestBetweenExSecs     by rememberSaveable { mutableIntStateOf(0) }
     var restBetweenExCardExpanded    by rememberSaveable { mutableStateOf(false) }
+    var countUp                      by rememberSaveable { mutableStateOf(false) }
 
     fun doClearAll() {
         routineEntries.clear()
@@ -456,6 +463,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         gracePeriodPref = prefs.getInt("pref_grace_period", 10)
         keepScreenOn    = prefs.getBoolean("pref_keep_screen_on", true)
         themePreference = prefs.getString("pref_theme", "system") ?: "system"
+        countUp         = prefs.getBoolean("pref_count_up", false)
         val defaultRest = prefs.getInt("pref_default_rest_between_exercises", 0)
         defaultRestBetweenExSecs = defaultRest
         // Seed the current routine's rest field from the global default.
@@ -570,10 +578,27 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             workoutPhase = WorkoutPhase.COMPLETE
         } else {
             currentStepIndex = nextIdx
-            timerSecondsRemaining = when (val s = workoutSteps[nextIdx]) {
+            val dur = when (val s = workoutSteps[nextIdx]) {
                 is WorkoutStep.Work -> s.durationSeconds
                 is WorkoutStep.Rest -> s.durationSeconds
             }
+            timerSecondsRemaining = dur
+            stepEndTimeMs = if (dur > 0) System.currentTimeMillis() + dur * 1000L else 0L
+        }
+    }
+
+    /** Toggles pause/resume, keeping the wall-clock end times accurate. */
+    fun handlePauseToggle() {
+        val now = System.currentTimeMillis()
+        if (!isPaused) {
+            pausedAtMs = now
+            isPaused = true
+        } else {
+            val pausedDuration = now - pausedAtMs
+            if (graceEndTimeMs > 0L) graceEndTimeMs += pausedDuration
+            if (stepEndTimeMs  > 0L) stepEndTimeMs  += pausedDuration
+            pausedAtMs = 0L
+            isPaused = false
         }
     }
 
@@ -634,35 +659,50 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     }
 
     // Counts down the grace period before the first workout step begins.
-    LaunchedEffect(workoutPhase, isPaused, graceSecondsRemaining) {
-        if (workoutPhase == WorkoutPhase.GRACE && !isPaused && graceSecondsRemaining > 0) {
-            delay(1000)
-            graceSecondsRemaining--
-            if (graceSecondsRemaining == 0) {
+    // Uses wall-clock time so the countdown continues correctly when the app is backgrounded.
+    LaunchedEffect(workoutPhase, isPaused) {
+        if (workoutPhase != WorkoutPhase.GRACE || isPaused) return@LaunchedEffect
+        while (true) {
+            val remaining = kotlin.math.ceil(
+                (graceEndTimeMs - System.currentTimeMillis()) / 1000.0
+            ).toInt().coerceAtLeast(0)
+            graceSecondsRemaining = remaining
+            if (remaining == 0) {
                 workoutPhase = WorkoutPhase.RUNNING
                 workoutStartTimeMs = System.currentTimeMillis()
                 workoutEndTimeMs   = 0L
                 currentStepIndex = 0
-                timerSecondsRemaining = when (val s = workoutSteps.getOrNull(0)) {
+                val dur = when (val s = workoutSteps.getOrNull(0)) {
                     is WorkoutStep.Work -> s.durationSeconds
                     is WorkoutStep.Rest -> s.durationSeconds
                     null -> 0
                 }
+                timerSecondsRemaining = dur
+                stepEndTimeMs = if (dur > 0) System.currentTimeMillis() + dur * 1000L else 0L
+                break
             }
+            delay(100)
         }
     }
 
     // Per-step countdown timer; auto-advances to the next step on expiry.
-    LaunchedEffect(workoutPhase, isPaused, timerSecondsRemaining, currentStepIndex) {
-        if (workoutPhase != WorkoutPhase.RUNNING || isPaused || timerSecondsRemaining <= 0) return@LaunchedEffect
-        delay(1000)
-        timerSecondsRemaining--
-        if (timerSecondsRemaining == 0) {
-            val step = workoutSteps.getOrNull(currentStepIndex)
-            val shouldDing = step is WorkoutStep.Rest ||
-                (step is WorkoutStep.Work && step.durationSeconds > 0)
-            if (shouldDing && soundEnabled) toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 600)
-            advanceStep()
+    // Uses wall-clock time so the timer continues correctly when the app is backgrounded.
+    LaunchedEffect(workoutPhase, isPaused, currentStepIndex) {
+        if (workoutPhase != WorkoutPhase.RUNNING || isPaused || stepEndTimeMs == 0L) return@LaunchedEffect
+        while (true) {
+            val remaining = kotlin.math.ceil(
+                (stepEndTimeMs - System.currentTimeMillis()) / 1000.0
+            ).toInt().coerceAtLeast(0)
+            if (remaining != timerSecondsRemaining) timerSecondsRemaining = remaining
+            if (remaining == 0) {
+                val step = workoutSteps.getOrNull(currentStepIndex)
+                val shouldDing = step is WorkoutStep.Rest ||
+                    (step is WorkoutStep.Work && step.durationSeconds > 0)
+                if (shouldDing && soundEnabled) toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 600)
+                advanceStep()
+                break
+            }
+            delay(100)
         }
     }
 
@@ -704,6 +744,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             if (workoutPhase == WorkoutPhase.EDITING) {
                 ExtendedFloatingActionButton(
                     onClick = { clearForm(); showExerciseSheet = true },
+                    modifier = Modifier.semantics { testTag = "fab_add_exercise" },
                     icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
                     text = { Text("Add Exercise") }
                 )
@@ -750,7 +791,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
-                        .padding(horizontal = 16.dp),
+                        .padding(horizontal = 16.dp)
+                        .semantics { testTag = "screen_editing" },
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(top = 16.dp, bottom = 120.dp)
                 ) {
@@ -844,7 +886,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                 Text(
                                     "No exercises yet",
                                     style = MaterialTheme.typography.titleSmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                                    modifier = Modifier.semantics { testTag = "empty_state_text" }
                                 )
                                 Text(
                                     "Tap + Add Exercise to get started",
@@ -1105,14 +1148,19 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         item {
                             Spacer(Modifier.height(4.dp))
                             Button(
-                                onClick = {
-                                    workoutPhase = WorkoutPhase.GRACE
-                                    isPaused = false
-                                    graceSecondsRemaining = gracePeriodPref
-                                    currentStepIndex = 0
-                                    timerSecondsRemaining = 0
-                                },
-                                modifier = Modifier.fillMaxWidth(),
+                                    onClick = {
+                                        workoutPhase = WorkoutPhase.GRACE
+                                        isPaused = false
+                                        graceSecondsRemaining = gracePeriodPref
+                                        currentStepIndex = 0
+                                        timerSecondsRemaining = 0
+                                        graceEndTimeMs = System.currentTimeMillis() + gracePeriodPref * 1000L
+                                        stepEndTimeMs = 0L
+                                        pausedAtMs = 0L
+                                    },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .semantics { testTag = "btn_start_workout" },
                                 shape = RoundedCornerShape(14.dp),
                                 contentPadding = PaddingValues(vertical = 16.dp)
                             ) {
@@ -1144,7 +1192,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                        .padding(horizontal = 24.dp, vertical = 16.dp)
+                        .semantics { testTag = "screen_grace" },
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
@@ -1163,7 +1212,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         fontWeight = FontWeight.Bold,
                         color = if (isPaused) MaterialTheme.colorScheme.onSurfaceVariant
                                 else MaterialTheme.colorScheme.primary,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.semantics { testTag = "grace_countdown" }
                     )
                     if (!isPaused) {
                         Text(
@@ -1240,8 +1290,10 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         OutlinedButton(
-                            onClick = { isPaused = !isPaused },
-                            modifier = Modifier.weight(1f),
+                            onClick = { handlePauseToggle() },
+                            modifier = Modifier
+                                .weight(1f)
+                                .semantics { testTag = "btn_pause_continue" },
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Text(if (isPaused) "Continue" else "Pause")
@@ -1268,7 +1320,10 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 val stepProgress = if (workoutSteps.isNotEmpty())
                     currentStepIndex.toFloat() / workoutSteps.size.toFloat() else 0f
 
-                Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+                Box(modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .semantics { testTag = "screen_running" }) {
                     Column(modifier = Modifier.fillMaxSize()) {
                         // Progress bar and step label.
                         LinearProgressIndicator(
@@ -1291,7 +1346,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                     isPaused -> MaterialTheme.colorScheme.onSurfaceVariant
                                     isRestStep -> MaterialTheme.colorScheme.tertiary
                                     else -> MaterialTheme.colorScheme.primary
-                                }
+                                },
+                                modifier = Modifier.semantics { testTag = "running_status_label" }
                             )
                             Text(
                                 "Step ${currentStepIndex + 1} of ${workoutSteps.size}",
@@ -1314,7 +1370,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                     currentIndex = currentStepIndex,
                                     totalSteps = workoutSteps.size,
                                     timerSeconds = timerSecondsRemaining,
-                                    isPaused = isPaused
+                                    isPaused = isPaused,
+                                    countUp = countUp
                                 )
                             }
                         }
@@ -1338,8 +1395,10 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             OutlinedButton(
-                                onClick = { isPaused = !isPaused },
-                                modifier = Modifier.weight(1f),
+                                onClick = { handlePauseToggle() },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .semantics { testTag = "btn_pause_continue" },
                                 shape = RoundedCornerShape(12.dp)
                             ) { Text(if (isPaused) "Continue" else "Pause") }
                             if (isRepBased) {
@@ -1349,7 +1408,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                                         advanceStep()
                                     },
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .semantics { testTag = "btn_done" },
                                     shape = RoundedCornerShape(12.dp)
                                 ) {
                                     Icon(Icons.Rounded.Check, null, modifier = Modifier.size(16.dp))
@@ -1363,14 +1424,18 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                                         advanceStep()
                                     },
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .semantics { testTag = "btn_skip" },
                                     shape = RoundedCornerShape(12.dp)
                                 ) { Text(if (isRestStep) "Skip Rest" else "Skip") }
                             }
                         }
                         TextButton(
                             onClick = { workoutPhase = WorkoutPhase.EDITING },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics { testTag = "btn_end_workout" }
                         ) {
                             Text(
                                 "End Workout",
@@ -1391,7 +1456,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         .fillMaxSize()
                         .padding(innerPadding)
                         .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 24.dp, vertical = 24.dp),
+                        .padding(horizontal = 24.dp, vertical = 24.dp)
+                        .semantics { testTag = "screen_complete" },
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Spacer(Modifier.height(24.dp))
@@ -1399,7 +1465,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         text = "Done.",
                         style = MaterialTheme.typography.displayMedium,
                         fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.semantics { testTag = "complete_heading" }
                     )
                     Spacer(Modifier.height(6.dp))
                     if (elapsedSecs > 0) {
@@ -1466,7 +1533,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     Spacer(Modifier.height(32.dp))
                     Button(
                         onClick = { workoutPhase = WorkoutPhase.EDITING },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { testTag = "btn_back_to_routine" },
                         shape = RoundedCornerShape(14.dp),
                         contentPadding = PaddingValues(vertical = 16.dp)
                     ) {
@@ -1586,7 +1655,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
-                    .padding(bottom = 32.dp),
+                    .padding(bottom = 32.dp)
+                    .semantics { testTag = "exercise_form_sheet" },
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Row(
@@ -1653,7 +1723,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             }
                         )
                     },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { testTag = "field_exercise_name" },
                     singleLine = true,
                     shape = RoundedCornerShape(12.dp)
                 )
@@ -1780,7 +1852,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             amount = durationAmount,
                             onAmountChange = { durationAmount = it.filter(Char::isDigit) },
                             unit = durationUnit,
-                            onUnitChange = { durationUnit = it }
+                            onUnitChange = { durationUnit = it },
+                            amountTestTag = "field_cardio_duration"
                         )
                         OutlinedTextField(
                             value = details,
@@ -1943,7 +2016,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             }
                         }
                     },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { testTag = "btn_submit_exercise" },
                     shape = RoundedCornerShape(12.dp),
                     colors = if (isEditing)
                         ButtonDefaults.filledTonalButtonColors(
@@ -2070,6 +2145,50 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             prefs.edit().putBoolean("pref_keep_screen_on", it).apply()
                         }
                     )
+                }
+
+                // Timer direction selector.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Rounded.Timer,
+                            contentDescription = null,
+                            modifier = Modifier.size(22.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("Timer direction", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "Display timers counting down or up",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        SegmentedButton(
+                            selected = !countUp,
+                            onClick = {
+                                countUp = false
+                                prefs.edit().putBoolean("pref_count_up", false).apply()
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(0, 2)
+                        ) { Text("Count down") }
+                        SegmentedButton(
+                            selected = countUp,
+                            onClick = {
+                                countUp = true
+                                prefs.edit().putBoolean("pref_count_up", true).apply()
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(1, 2)
+                        ) { Text("Count up") }
+                    }
                 }
 
                 Spacer(Modifier.height(8.dp))
@@ -2623,7 +2742,8 @@ private fun WorkoutTimelineItem(
     currentIndex: Int,
     totalSteps: Int,
     timerSeconds: Int,
-    isPaused: Boolean
+    isPaused: Boolean,
+    countUp: Boolean = false
 ) {
     val isPast    = stepIndex < currentIndex
     val isCurrent = stepIndex == currentIndex
@@ -2769,8 +2889,10 @@ private fun WorkoutTimelineItem(
                         }
                         Spacer(Modifier.height(10.dp))
                         if (step.durationSeconds > 0) {
+                            val displaySeconds = if (countUp) step.durationSeconds - timerSeconds else timerSeconds
+                            val timerLabel = if (countUp) "elapsed / ${formatCountdown(step.durationSeconds)}" else "remaining"
                             Text(
-                                formatCountdown(timerSeconds),
+                                formatCountdown(displaySeconds),
                                 style = MaterialTheme.typography.displayMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = if (isPaused)
@@ -2778,11 +2900,11 @@ private fun WorkoutTimelineItem(
                                 else MaterialTheme.colorScheme.onPrimaryContainer,
                                 modifier = Modifier.semantics {
                                     liveRegion = LiveRegionMode.Polite
-                                    contentDescription = "${formatCountdown(timerSeconds)} remaining"
+                                    contentDescription = "${formatCountdown(displaySeconds)} $timerLabel"
                                 }
                             )
                             Text(
-                                "remaining",
+                                timerLabel,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
                             )
@@ -2820,8 +2942,10 @@ private fun WorkoutTimelineItem(
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.65f)
                         )
+                        val restDisplaySeconds = if (countUp) step.durationSeconds - timerSeconds else timerSeconds
+                        val restTimerLabel = if (countUp) "elapsed / ${formatCountdown(step.durationSeconds)}" else "remaining"
                         Text(
-                            formatCountdown(timerSeconds),
+                            formatCountdown(restDisplaySeconds),
                             style = MaterialTheme.typography.displayMedium,
                             fontWeight = FontWeight.Bold,
                             color = if (isPaused)
@@ -2829,7 +2953,7 @@ private fun WorkoutTimelineItem(
                             else MaterialTheme.colorScheme.onTertiaryContainer,
                             modifier = Modifier.semantics {
                                 liveRegion = LiveRegionMode.Polite
-                                contentDescription = "Rest: ${formatCountdown(timerSeconds)} remaining"
+                                contentDescription = "Rest: ${formatCountdown(restDisplaySeconds)} $restTimerLabel"
                             }
                         )
                         if (step.upNextName.isNotBlank()) {
@@ -2934,7 +3058,8 @@ private fun RestDurationInput(
     amount: String,
     onAmountChange: (String) -> Unit,
     unit: RestUnit,
-    onUnitChange: (RestUnit) -> Unit
+    onUnitChange: (RestUnit) -> Unit,
+    amountTestTag: String = ""
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -2952,7 +3077,9 @@ private fun RestDurationInput(
                 value = amount,
                 onValueChange = onAmountChange,
                 placeholder = { Text("0") },
-                modifier = Modifier.weight(0.35f),
+                modifier = Modifier.weight(0.35f).then(
+                    if (amountTestTag.isNotEmpty()) Modifier.semantics { testTag = amountTestTag } else Modifier
+                ),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 shape = RoundedCornerShape(12.dp)

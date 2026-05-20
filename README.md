@@ -27,6 +27,7 @@ No streaks. No badges. No social feed. No "great job!" No suggested workouts. No
 - Rep-based steps wait for you to tap Done
 - Per-side exercises (Left / Right) are tracked as separate steps in the sequence
 - Pause at any point; a sound cue fires when any timer hits zero
+- **Designed to stay in the foreground** — timers remain accurate through brief interruptions (e.g. silencing a notification), but Reps has no background service and will not reliably sound cues or auto-advance steps while you are actively using another app
 
 ---
 
@@ -37,6 +38,7 @@ No streaks. No badges. No social feed. No "great job!" No suggested workouts. No
 - Judge whether your routine is good or bad
 - Require an account or any internet access
 - Send notifications, collect analytics, or phone home
+- Run reliably in the background — Reps is designed to stay on screen during your workout; brief interruptions are fine, but switching away for an extended period may cause timers and sound cues to miss
 
 ---
 
@@ -141,6 +143,8 @@ A scrolling timeline shows every set and rest period in sequence — past, curre
   • A sound cue fires when any timer reaches zero.
   • Pause at any point and pick up exactly where you left off.
 
+Reps is designed to stay in the foreground while you work out. Timers stay accurate through brief interruptions (silencing a notification, checking a message), but Reps runs no background service — if you switch to another app for an extended period, sound cues and auto-advance may not fire on time.
+
 ── SAVING AND RESTORING ──
 
 Save any routine to your local library with a name, an intensity label, and muscle group tags. Load a saved routine back onto the builder in one tap. Edit a saved routine in-place — changes write back when you save again.
@@ -154,6 +158,7 @@ Export your entire library to a JSON file and import it back on any device.
   • No progress tracking, no body measurements, no streaks, no badges.
   • No suggested workouts. No form tips. No "great job!"
   • Does not require any Android permissions.
+  • Does not run in the background. Reps is built to stay on screen during your workout. Timers stay accurate through brief interruptions, but switching to another app for an extended period may cause sound cues and auto-advance to miss. Use the Pause button if you need to step away.
 
 If you want a fitness social network, a coaching app, or a progress journal, Reps is the wrong app. If you want something that runs your workout and stays out of the way, this is it.
 

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reps — Android Workout App</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --accent: #6c8ef7;
+      --text: #e8eaf0;
+      --muted: #8b8fa8;
+      --border: #2a2d3e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.7;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 2.4rem; font-weight: 700; letter-spacing: -0.5px; }
+    .tagline { color: var(--muted); margin-top: 0.4rem; font-size: 1.05rem; }
+    .divider { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1rem;
+      text-decoration: none;
+      color: var(--text);
+      display: block;
+      transition: border-color 0.15s;
+    }
+    .card:hover { border-color: var(--accent); }
+    .card h2 { font-size: 1.1rem; color: var(--accent); margin-bottom: 0.3rem; }
+    .card p { color: var(--muted); font-size: 0.9rem; }
+    footer { margin-top: 3rem; color: var(--muted); font-size: 0.82rem; text-align: center; }
+    footer a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Reps</h1>
+    <p class="tagline">Build and run custom workout routines. No noise. Just your work.</p>
+    <hr class="divider" />
+
+    <a class="card" href="privacy-policy.html">
+      <h2>📄 Privacy Policy</h2>
+      <p>What Reps collects (nothing), how your data is stored, and how to contact the developer.</p>
+    </a>
+
+    <a class="card" href="license.html">
+      <h2>⚖️ License</h2>
+      <p>GNU General Public License v3.0 — open source, attribution required, forks must remain open source.</p>
+    </a>
+
+    <a class="card" href="https://github.com/theboyers/Reps">
+      <h2>💻 Source Code</h2>
+      <p>View the full source code, contribute, or fork on GitHub.</p>
+    </a>
+
+    <hr class="divider" />
+    <footer>
+      Reps © 2026 Christopher Boyer &nbsp;·&nbsp;
+      <a href="https://github.com/theboyers/Reps">github.com/theboyers/Reps</a>
+    </footer>
+  </div>
+</body>
+</html>
+

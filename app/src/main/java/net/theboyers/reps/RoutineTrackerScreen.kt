@@ -125,6 +125,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.text.style.TextOverflow
 
 import androidx.compose.foundation.lazy.items
@@ -750,7 +751,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
-                        .padding(horizontal = 16.dp),
+                        .padding(horizontal = 16.dp)
+                        .semantics { testTag = "screen_editing" },
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(top = 16.dp, bottom = 120.dp)
                 ) {
@@ -844,7 +846,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                 Text(
                                     "No exercises yet",
                                     style = MaterialTheme.typography.titleSmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                                    modifier = Modifier.semantics { testTag = "empty_state_text" }
                                 )
                                 Text(
                                     "Tap + Add Exercise to get started",
@@ -1112,7 +1115,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                     currentStepIndex = 0
                                     timerSecondsRemaining = 0
                                 },
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .semantics { testTag = "btn_start_workout" },
                                 shape = RoundedCornerShape(14.dp),
                                 contentPadding = PaddingValues(vertical = 16.dp)
                             ) {
@@ -1144,7 +1149,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                        .padding(horizontal = 24.dp, vertical = 16.dp)
+                        .semantics { testTag = "screen_grace" },
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
@@ -1163,7 +1169,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         fontWeight = FontWeight.Bold,
                         color = if (isPaused) MaterialTheme.colorScheme.onSurfaceVariant
                                 else MaterialTheme.colorScheme.primary,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.semantics { testTag = "grace_countdown" }
                     )
                     if (!isPaused) {
                         Text(
@@ -1241,7 +1248,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     ) {
                         OutlinedButton(
                             onClick = { isPaused = !isPaused },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .semantics { testTag = "btn_pause_continue" },
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Text(if (isPaused) "Continue" else "Pause")
@@ -1268,7 +1277,10 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 val stepProgress = if (workoutSteps.isNotEmpty())
                     currentStepIndex.toFloat() / workoutSteps.size.toFloat() else 0f
 
-                Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+                Box(modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .semantics { testTag = "screen_running" }) {
                     Column(modifier = Modifier.fillMaxSize()) {
                         // Progress bar and step label.
                         LinearProgressIndicator(
@@ -1291,7 +1303,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                     isPaused -> MaterialTheme.colorScheme.onSurfaceVariant
                                     isRestStep -> MaterialTheme.colorScheme.tertiary
                                     else -> MaterialTheme.colorScheme.primary
-                                }
+                                },
+                                modifier = Modifier.semantics { testTag = "running_status_label" }
                             )
                             Text(
                                 "Step ${currentStepIndex + 1} of ${workoutSteps.size}",
@@ -1339,7 +1352,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         ) {
                             OutlinedButton(
                                 onClick = { isPaused = !isPaused },
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .semantics { testTag = "btn_pause_continue" },
                                 shape = RoundedCornerShape(12.dp)
                             ) { Text(if (isPaused) "Continue" else "Pause") }
                             if (isRepBased) {
@@ -1349,7 +1364,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                                         advanceStep()
                                     },
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .semantics { testTag = "btn_done" },
                                     shape = RoundedCornerShape(12.dp)
                                 ) {
                                     Icon(Icons.Rounded.Check, null, modifier = Modifier.size(16.dp))
@@ -1363,14 +1380,18 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                                         advanceStep()
                                     },
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .semantics { testTag = "btn_skip" },
                                     shape = RoundedCornerShape(12.dp)
                                 ) { Text(if (isRestStep) "Skip Rest" else "Skip") }
                             }
                         }
                         TextButton(
                             onClick = { workoutPhase = WorkoutPhase.EDITING },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics { testTag = "btn_end_workout" }
                         ) {
                             Text(
                                 "End Workout",
@@ -1391,7 +1412,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         .fillMaxSize()
                         .padding(innerPadding)
                         .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 24.dp, vertical = 24.dp),
+                        .padding(horizontal = 24.dp, vertical = 24.dp)
+                        .semantics { testTag = "screen_complete" },
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Spacer(Modifier.height(24.dp))
@@ -1399,7 +1421,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         text = "Done.",
                         style = MaterialTheme.typography.displayMedium,
                         fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.semantics { testTag = "complete_heading" }
                     )
                     Spacer(Modifier.height(6.dp))
                     if (elapsedSecs > 0) {
@@ -1466,7 +1489,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     Spacer(Modifier.height(32.dp))
                     Button(
                         onClick = { workoutPhase = WorkoutPhase.EDITING },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { testTag = "btn_back_to_routine" },
                         shape = RoundedCornerShape(14.dp),
                         contentPadding = PaddingValues(vertical = 16.dp)
                     ) {
@@ -1586,7 +1611,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
-                    .padding(bottom = 32.dp),
+                    .padding(bottom = 32.dp)
+                    .semantics { testTag = "exercise_form_sheet" },
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Row(
@@ -1653,7 +1679,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             }
                         )
                     },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { testTag = "field_exercise_name" },
                     singleLine = true,
                     shape = RoundedCornerShape(12.dp)
                 )
@@ -1943,7 +1971,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             }
                         }
                     },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { testTag = "btn_submit_exercise" },
                     shape = RoundedCornerShape(12.dp),
                     colors = if (isEditing)
                         ButtonDefaults.filledTonalButtonColors(

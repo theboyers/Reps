@@ -89,6 +89,7 @@ import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.runtime.getValue
@@ -432,6 +433,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     var themePreference              by rememberSaveable { mutableStateOf("system") }
     var defaultRestBetweenExSecs     by rememberSaveable { mutableIntStateOf(0) }
     var restBetweenExCardExpanded    by rememberSaveable { mutableStateOf(false) }
+    var countUp                      by rememberSaveable { mutableStateOf(false) }
 
     fun doClearAll() {
         routineEntries.clear()
@@ -457,6 +459,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         gracePeriodPref = prefs.getInt("pref_grace_period", 10)
         keepScreenOn    = prefs.getBoolean("pref_keep_screen_on", true)
         themePreference = prefs.getString("pref_theme", "system") ?: "system"
+        countUp         = prefs.getBoolean("pref_count_up", false)
         val defaultRest = prefs.getInt("pref_default_rest_between_exercises", 0)
         defaultRestBetweenExSecs = defaultRest
         // Seed the current routine's rest field from the global default.
@@ -705,6 +708,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             if (workoutPhase == WorkoutPhase.EDITING) {
                 ExtendedFloatingActionButton(
                     onClick = { clearForm(); showExerciseSheet = true },
+                    modifier = Modifier.semantics { testTag = "fab_add_exercise" },
                     icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
                     text = { Text("Add Exercise") }
                 )
@@ -1327,7 +1331,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                     currentIndex = currentStepIndex,
                                     totalSteps = workoutSteps.size,
                                     timerSeconds = timerSecondsRemaining,
-                                    isPaused = isPaused
+                                    isPaused = isPaused,
+                                    countUp = countUp
                                 )
                             }
                         }
@@ -1808,7 +1813,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             amount = durationAmount,
                             onAmountChange = { durationAmount = it.filter(Char::isDigit) },
                             unit = durationUnit,
-                            onUnitChange = { durationUnit = it }
+                            onUnitChange = { durationUnit = it },
+                            amountTestTag = "field_cardio_duration"
                         )
                         OutlinedTextField(
                             value = details,
@@ -2100,6 +2106,50 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             prefs.edit().putBoolean("pref_keep_screen_on", it).apply()
                         }
                     )
+                }
+
+                // Timer direction selector.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Rounded.Timer,
+                            contentDescription = null,
+                            modifier = Modifier.size(22.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("Timer direction", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "Display timers counting down or up",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        SegmentedButton(
+                            selected = !countUp,
+                            onClick = {
+                                countUp = false
+                                prefs.edit().putBoolean("pref_count_up", false).apply()
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(0, 2)
+                        ) { Text("Count down") }
+                        SegmentedButton(
+                            selected = countUp,
+                            onClick = {
+                                countUp = true
+                                prefs.edit().putBoolean("pref_count_up", true).apply()
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(1, 2)
+                        ) { Text("Count up") }
+                    }
                 }
 
                 Spacer(Modifier.height(8.dp))
@@ -2653,7 +2703,8 @@ private fun WorkoutTimelineItem(
     currentIndex: Int,
     totalSteps: Int,
     timerSeconds: Int,
-    isPaused: Boolean
+    isPaused: Boolean,
+    countUp: Boolean = false
 ) {
     val isPast    = stepIndex < currentIndex
     val isCurrent = stepIndex == currentIndex
@@ -2799,8 +2850,10 @@ private fun WorkoutTimelineItem(
                         }
                         Spacer(Modifier.height(10.dp))
                         if (step.durationSeconds > 0) {
+                            val displaySeconds = if (countUp) step.durationSeconds - timerSeconds else timerSeconds
+                            val timerLabel = if (countUp) "elapsed / ${formatCountdown(step.durationSeconds)}" else "remaining"
                             Text(
-                                formatCountdown(timerSeconds),
+                                formatCountdown(displaySeconds),
                                 style = MaterialTheme.typography.displayMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = if (isPaused)
@@ -2808,11 +2861,11 @@ private fun WorkoutTimelineItem(
                                 else MaterialTheme.colorScheme.onPrimaryContainer,
                                 modifier = Modifier.semantics {
                                     liveRegion = LiveRegionMode.Polite
-                                    contentDescription = "${formatCountdown(timerSeconds)} remaining"
+                                    contentDescription = "${formatCountdown(displaySeconds)} $timerLabel"
                                 }
                             )
                             Text(
-                                "remaining",
+                                timerLabel,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
                             )
@@ -2850,8 +2903,10 @@ private fun WorkoutTimelineItem(
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.65f)
                         )
+                        val restDisplaySeconds = if (countUp) step.durationSeconds - timerSeconds else timerSeconds
+                        val restTimerLabel = if (countUp) "elapsed / ${formatCountdown(step.durationSeconds)}" else "remaining"
                         Text(
-                            formatCountdown(timerSeconds),
+                            formatCountdown(restDisplaySeconds),
                             style = MaterialTheme.typography.displayMedium,
                             fontWeight = FontWeight.Bold,
                             color = if (isPaused)
@@ -2859,7 +2914,7 @@ private fun WorkoutTimelineItem(
                             else MaterialTheme.colorScheme.onTertiaryContainer,
                             modifier = Modifier.semantics {
                                 liveRegion = LiveRegionMode.Polite
-                                contentDescription = "Rest: ${formatCountdown(timerSeconds)} remaining"
+                                contentDescription = "Rest: ${formatCountdown(restDisplaySeconds)} $restTimerLabel"
                             }
                         )
                         if (step.upNextName.isNotBlank()) {
@@ -2964,7 +3019,8 @@ private fun RestDurationInput(
     amount: String,
     onAmountChange: (String) -> Unit,
     unit: RestUnit,
-    onUnitChange: (RestUnit) -> Unit
+    onUnitChange: (RestUnit) -> Unit,
+    amountTestTag: String = ""
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -2982,7 +3038,9 @@ private fun RestDurationInput(
                 value = amount,
                 onValueChange = onAmountChange,
                 placeholder = { Text("0") },
-                modifier = Modifier.weight(0.35f),
+                modifier = Modifier.weight(0.35f).then(
+                    if (amountTestTag.isNotEmpty()) Modifier.semantics { testTag = amountTestTag } else Modifier
+                ),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 shape = RoundedCornerShape(12.dp)

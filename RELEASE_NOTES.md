@@ -2,6 +2,29 @@
 
 ---
 
+## v1.1.0 — May 20, 2026
+
+### UX & Accessibility
+
+**Workout Summary Screen**
+- Completion screen now shows a full checklist of every exercise you finished — name, sets, and reps/duration
+- Elapsed workout time is shown at the top (e.g. "32 min 14 sec")
+- Removed the "Great work!" message — Reps doesn't hand-hold
+
+**Haptic Feedback**
+- Tapping **Done** (rep-based sets) now fires a haptic confirmation
+- Tapping **Skip / Skip Rest** does the same
+- The last 3 seconds of any timed step or rest pulse once per second as a tactile countdown cue
+
+**TalkBack / Screen Reader**
+- The active countdown timer (work and rest) is now a live region — TalkBack announces remaining time as it counts down
+- Exercise cards in the routine builder announce their position and name to screen readers
+
+**Font Scaling**
+- Exercise names in the active workout card, routine builder, and completion summary now gracefully truncate at very large system font sizes instead of overflowing
+
+---
+
 ## v1.0.0 — May 20, 2026
 
 Initial public release of **Reps** — a no-frills workout runner for Android.

@@ -2,6 +2,26 @@
 
 ---
 
+## v1.2.0 — May 20, 2026
+
+### Timer Improvements
+
+**Count-up mode**
+- Settings now includes a **Count up / Count down** toggle for all workout timers
+- In count-up mode the timer shows elapsed time (e.g. `0:23 elapsed / 1:00`) so you always know both how far you've come and what the total duration is
+- Grace period always counts down regardless of this setting
+
+**Background accuracy**
+- Timers are now wall-clock based rather than tick based
+- Returning to the app after a brief interruption (silencing a notification, checking a message) will show the correct remaining time immediately
+- Reps is designed to stay in the foreground; no background service is used and sound cues are not guaranteed when another app is active — use the Pause button if you need to step away
+
+### Testing
+
+- Added a comprehensive test suite: 68 unit tests (JVM) covering input parsing, step building, and timer formatting, plus 50 instrumented UI tests covering the full editing, workout, and library flows
+
+---
+
 ## v1.1.0 — May 20, 2026
 
 ### UX & Accessibility

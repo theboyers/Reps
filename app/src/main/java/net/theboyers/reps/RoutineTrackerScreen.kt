@@ -396,6 +396,10 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     var timerSecondsRemaining by rememberSaveable { mutableIntStateOf(0) }
     var workoutStartTimeMs    by rememberSaveable { mutableStateOf(0L) }
     var workoutEndTimeMs      by rememberSaveable { mutableStateOf(0L) }
+    // Wall-clock end times for timers — survives background correctly.
+    var stepEndTimeMs   by rememberSaveable { mutableStateOf(0L) }
+    var graceEndTimeMs  by rememberSaveable { mutableStateOf(0L) }
+    var pausedAtMs      by rememberSaveable { mutableStateOf(0L) }
 
     // Derived workout step sequence, rebuilt whenever entries or rest settings change.
     val workoutSteps = buildWorkoutSteps(routineEntries, routineRestBetweenExercisesSeconds)
@@ -574,10 +578,27 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             workoutPhase = WorkoutPhase.COMPLETE
         } else {
             currentStepIndex = nextIdx
-            timerSecondsRemaining = when (val s = workoutSteps[nextIdx]) {
+            val dur = when (val s = workoutSteps[nextIdx]) {
                 is WorkoutStep.Work -> s.durationSeconds
                 is WorkoutStep.Rest -> s.durationSeconds
             }
+            timerSecondsRemaining = dur
+            stepEndTimeMs = if (dur > 0) System.currentTimeMillis() + dur * 1000L else 0L
+        }
+    }
+
+    /** Toggles pause/resume, keeping the wall-clock end times accurate. */
+    fun handlePauseToggle() {
+        val now = System.currentTimeMillis()
+        if (!isPaused) {
+            pausedAtMs = now
+            isPaused = true
+        } else {
+            val pausedDuration = now - pausedAtMs
+            if (graceEndTimeMs > 0L) graceEndTimeMs += pausedDuration
+            if (stepEndTimeMs  > 0L) stepEndTimeMs  += pausedDuration
+            pausedAtMs = 0L
+            isPaused = false
         }
     }
 
@@ -638,35 +659,50 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     }
 
     // Counts down the grace period before the first workout step begins.
-    LaunchedEffect(workoutPhase, isPaused, graceSecondsRemaining) {
-        if (workoutPhase == WorkoutPhase.GRACE && !isPaused && graceSecondsRemaining > 0) {
-            delay(1000)
-            graceSecondsRemaining--
-            if (graceSecondsRemaining == 0) {
+    // Uses wall-clock time so the countdown continues correctly when the app is backgrounded.
+    LaunchedEffect(workoutPhase, isPaused) {
+        if (workoutPhase != WorkoutPhase.GRACE || isPaused) return@LaunchedEffect
+        while (true) {
+            val remaining = kotlin.math.ceil(
+                (graceEndTimeMs - System.currentTimeMillis()) / 1000.0
+            ).toInt().coerceAtLeast(0)
+            graceSecondsRemaining = remaining
+            if (remaining == 0) {
                 workoutPhase = WorkoutPhase.RUNNING
                 workoutStartTimeMs = System.currentTimeMillis()
                 workoutEndTimeMs   = 0L
                 currentStepIndex = 0
-                timerSecondsRemaining = when (val s = workoutSteps.getOrNull(0)) {
+                val dur = when (val s = workoutSteps.getOrNull(0)) {
                     is WorkoutStep.Work -> s.durationSeconds
                     is WorkoutStep.Rest -> s.durationSeconds
                     null -> 0
                 }
+                timerSecondsRemaining = dur
+                stepEndTimeMs = if (dur > 0) System.currentTimeMillis() + dur * 1000L else 0L
+                break
             }
+            delay(100)
         }
     }
 
     // Per-step countdown timer; auto-advances to the next step on expiry.
-    LaunchedEffect(workoutPhase, isPaused, timerSecondsRemaining, currentStepIndex) {
-        if (workoutPhase != WorkoutPhase.RUNNING || isPaused || timerSecondsRemaining <= 0) return@LaunchedEffect
-        delay(1000)
-        timerSecondsRemaining--
-        if (timerSecondsRemaining == 0) {
-            val step = workoutSteps.getOrNull(currentStepIndex)
-            val shouldDing = step is WorkoutStep.Rest ||
-                (step is WorkoutStep.Work && step.durationSeconds > 0)
-            if (shouldDing && soundEnabled) toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 600)
-            advanceStep()
+    // Uses wall-clock time so the timer continues correctly when the app is backgrounded.
+    LaunchedEffect(workoutPhase, isPaused, currentStepIndex) {
+        if (workoutPhase != WorkoutPhase.RUNNING || isPaused || stepEndTimeMs == 0L) return@LaunchedEffect
+        while (true) {
+            val remaining = kotlin.math.ceil(
+                (stepEndTimeMs - System.currentTimeMillis()) / 1000.0
+            ).toInt().coerceAtLeast(0)
+            if (remaining != timerSecondsRemaining) timerSecondsRemaining = remaining
+            if (remaining == 0) {
+                val step = workoutSteps.getOrNull(currentStepIndex)
+                val shouldDing = step is WorkoutStep.Rest ||
+                    (step is WorkoutStep.Work && step.durationSeconds > 0)
+                if (shouldDing && soundEnabled) toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 600)
+                advanceStep()
+                break
+            }
+            delay(100)
         }
     }
 
@@ -1112,13 +1148,16 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         item {
                             Spacer(Modifier.height(4.dp))
                             Button(
-                                onClick = {
-                                    workoutPhase = WorkoutPhase.GRACE
-                                    isPaused = false
-                                    graceSecondsRemaining = gracePeriodPref
-                                    currentStepIndex = 0
-                                    timerSecondsRemaining = 0
-                                },
+                                    onClick = {
+                                        workoutPhase = WorkoutPhase.GRACE
+                                        isPaused = false
+                                        graceSecondsRemaining = gracePeriodPref
+                                        currentStepIndex = 0
+                                        timerSecondsRemaining = 0
+                                        graceEndTimeMs = System.currentTimeMillis() + gracePeriodPref * 1000L
+                                        stepEndTimeMs = 0L
+                                        pausedAtMs = 0L
+                                    },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .semantics { testTag = "btn_start_workout" },
@@ -1251,7 +1290,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         OutlinedButton(
-                            onClick = { isPaused = !isPaused },
+                            onClick = { handlePauseToggle() },
                             modifier = Modifier
                                 .weight(1f)
                                 .semantics { testTag = "btn_pause_continue" },
@@ -1356,7 +1395,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             OutlinedButton(
-                                onClick = { isPaused = !isPaused },
+                                onClick = { handlePauseToggle() },
                                 modifier = Modifier
                                     .weight(1f)
                                     .semantics { testTag = "btn_pause_continue" },

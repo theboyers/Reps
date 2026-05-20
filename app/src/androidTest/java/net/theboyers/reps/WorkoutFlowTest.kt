@@ -5,9 +5,10 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.ExternalResource
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 
 /**
@@ -22,15 +23,27 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class WorkoutFlowTest {
 
-    @get:Rule
-    val composeTestRule = createAndroidComposeRule<MainActivity>()
+    // Cleared before the activity starts so every test sees empty prefs
+    // without needing a mid-test recreate().
+    private val _composeTestRule = createAndroidComposeRule<MainActivity>()
+    val composeTestRule get() = _composeTestRule
 
-    @Before
-    fun clearSharedPreferences() {
-        InstrumentationRegistry.getInstrumentation().targetContext
-            .getSharedPreferences("reps_prefs", Context.MODE_PRIVATE)
-            .edit().clear().apply()
-    }
+    @get:Rule
+    val chain: RuleChain = RuleChain
+        .outerRule(object : ExternalResource() {
+            override fun before() {
+                InstrumentationRegistry.getInstrumentation().targetContext
+                    .getSharedPreferences("reps_prefs", Context.MODE_PRIVATE)
+                    .edit()
+                    .clear()
+                    // Use a 3-second grace period so startGraceAndWaitForRunning()
+                    // needs only ~3 s instead of the default 10 s, keeping the test
+                    // reliable even when the device is under load.
+                    .putInt("pref_grace_period", 3)
+                    .commit()
+            }
+        })
+        .around(_composeTestRule)
 
     // ── GRACE phase ───────────────────────────────────────────────────────────
 
@@ -253,7 +266,7 @@ class WorkoutFlowTest {
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private fun openAddExerciseSheet() {
-        composeTestRule.onNodeWithText("Add Exercise").performClick()
+        composeTestRule.onNodeWithTag("fab_add_exercise").performClick()
         composeTestRule.waitUntil(3_000) {
             composeTestRule.onAllNodesWithTag("exercise_form_sheet").fetchSemanticsNodes().isNotEmpty()
         }
@@ -294,8 +307,8 @@ class WorkoutFlowTest {
     private fun startGraceAndWaitForRunning() {
         composeTestRule.onNodeWithTag("btn_start_workout").performClick()
 
-        // Wait up to 15 s for the RUNNING phase to appear (grace period ≤ 10 s + buffer)
-        composeTestRule.waitUntil(timeoutMillis = 15_000) {
+        // Grace period is set to 3 s in @Before; allow 10 s total for the transition.
+        composeTestRule.waitUntil(timeoutMillis = 10_000) {
             composeTestRule.onAllNodesWithTag("screen_running").fetchSemanticsNodes().isNotEmpty()
         }
     }

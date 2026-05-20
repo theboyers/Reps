@@ -5,9 +5,10 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.ExternalResource
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 
 /**
@@ -19,15 +20,21 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class EditingPhaseTest {
 
-    @get:Rule
-    val composeTestRule = createAndroidComposeRule<MainActivity>()
+    // Cleared before the activity starts so every test sees empty prefs
+    // without needing a mid-test recreate().
+    private val _composeTestRule = createAndroidComposeRule<MainActivity>()
+    val composeTestRule get() = _composeTestRule
 
-    @Before
-    fun clearSharedPreferences() {
-        InstrumentationRegistry.getInstrumentation().targetContext
-            .getSharedPreferences("reps_prefs", Context.MODE_PRIVATE)
-            .edit().clear().apply()
-    }
+    @get:Rule
+    val chain: RuleChain = RuleChain
+        .outerRule(object : ExternalResource() {
+            override fun before() {
+                InstrumentationRegistry.getInstrumentation().targetContext
+                    .getSharedPreferences("reps_prefs", Context.MODE_PRIVATE)
+                    .edit().clear().commit()
+            }
+        })
+        .around(_composeTestRule)
 
     // ── initial state ─────────────────────────────────────────────────────────
 
@@ -93,6 +100,8 @@ class EditingPhaseTest {
     fun addTimedExercise_appearsInList() {
         openAddExerciseSheet()
         composeTestRule.onNodeWithText("Timed").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("field_exercise_name").performClick()
         composeTestRule.onNodeWithTag("field_exercise_name").performTextInput("Plank")
         composeTestRule.onNode(hasText("Sets").and(hasSetTextAction())).performTextInput("3")
         composeTestRule.onNode(hasText("Duration").and(hasSetTextAction())).performTextInput("45")
@@ -107,8 +116,11 @@ class EditingPhaseTest {
     fun addCardioExercise_appearsInList() {
         openAddExerciseSheet()
         composeTestRule.onNodeWithText("Cardio").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("field_exercise_name").performClick()
         composeTestRule.onNodeWithTag("field_exercise_name").performTextInput("Treadmill")
-        composeTestRule.onNode(hasText("Duration").and(hasSetTextAction())).performTextInput("20")
+        composeTestRule.onNodeWithTag("field_cardio_duration").performClick()
+        composeTestRule.onNodeWithTag("field_cardio_duration").performTextInput("20")
         composeTestRule.onNodeWithTag("btn_submit_exercise").performClick()
 
         composeTestRule.onNodeWithText("Treadmill").assertIsDisplayed()
@@ -191,7 +203,7 @@ class EditingPhaseTest {
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private fun openAddExerciseSheet() {
-        composeTestRule.onNodeWithText("Add Exercise").performClick()
+        composeTestRule.onNodeWithTag("fab_add_exercise").performClick()
         composeTestRule.waitUntil(3_000) {
             composeTestRule.onAllNodesWithTag("exercise_form_sheet").fetchSemanticsNodes().isNotEmpty()
         }

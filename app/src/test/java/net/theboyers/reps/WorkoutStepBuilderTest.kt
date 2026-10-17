@@ -18,8 +18,15 @@ class WorkoutStepBuilderTest {
         sets: Int = 3,
         reps: String = "10",
         restSecs: Int = 0,
-        isPerSide: Boolean = false
-    ) = RoutineEntry(name, "", sets.toString(), reps, restSecs, "STRENGTH", isPerSide)
+        isPerSide: Boolean = false,
+        weight: String? = null,
+        warmupSets: Int = 0,
+        warmupReps: String? = null,
+        warmupWeight: String? = null
+    ) = RoutineEntry(
+        name, "", sets.toString(), reps, restSecs, "STRENGTH", isPerSide,
+        weight, warmupSets, warmupReps, warmupWeight
+    )
 
     private fun timed(
         name: String,
@@ -225,6 +232,108 @@ class WorkoutStepBuilderTest {
     @Test fun strengthStep_repsOrDurationLabelIsCorrect() {
         val steps = buildWorkoutSteps(listOf(strength("Pull-ups", sets = 1, reps = "8-12")), 0)
         assertEquals("8-12", steps.workSteps.first().repsOrDurationLabel)
+    }
+
+    // ── weight ────────────────────────────────────────────────────────────────
+
+    @Test fun strengthStep_weightIsCarriedOnWorkingSteps() {
+        val steps = buildWorkoutSteps(listOf(strength("Bench Press", sets = 3, weight = "135 lb")), 0)
+        steps.workSteps.forEach { assertEquals("135 lb", it.weight) }
+    }
+
+    @Test fun strengthStep_withoutWeight_weightIsBlank() {
+        val steps = buildWorkoutSteps(listOf(strength("Push-ups", sets = 2)), 0)
+        steps.workSteps.forEach { assertEquals("", it.weight) }
+    }
+
+    // ── warmup sets ───────────────────────────────────────────────────────────
+
+    @Test fun warmupSets_arePrependedBeforeWorkingSets() {
+        val steps = buildWorkoutSteps(listOf(strength("Squats", sets = 3, warmupSets = 2)), 0)
+        // 2 warmup + 3 working
+        assertEquals(5, steps.workSteps.size)
+        assertTrue(steps.workSteps[0].isWarmup)
+        assertTrue(steps.workSteps[1].isWarmup)
+        assertFalse(steps.workSteps[2].isWarmup)
+    }
+
+    @Test fun warmupSets_areNumberedSeparately() {
+        val steps = buildWorkoutSteps(listOf(strength("Squats", sets = 3, warmupSets = 2)), 0)
+        val warmups = steps.workSteps.filter { it.isWarmup }
+        assertEquals(listOf(1, 2), warmups.map { it.setNumber })
+        warmups.forEach { assertEquals(2, it.totalSets) }
+    }
+
+    @Test fun workingSets_ignoreWarmupCountInNumbering() {
+        val steps = buildWorkoutSteps(listOf(strength("Squats", sets = 3, warmupSets = 2)), 0)
+        val working = steps.workSteps.filter { !it.isWarmup }
+        assertEquals(listOf(1, 2, 3), working.map { it.setNumber })
+        working.forEach { assertEquals(3, it.totalSets) }
+    }
+
+    @Test fun warmupReps_fallBackToWorkingReps() {
+        val steps = buildWorkoutSteps(
+            listOf(strength("Squats", sets = 2, reps = "8", warmupSets = 1)),
+            0
+        )
+        assertEquals("8", steps.workSteps.first { it.isWarmup }.repsOrDurationLabel)
+    }
+
+    @Test fun warmupReps_overrideWorkingReps() {
+        val steps = buildWorkoutSteps(
+            listOf(strength("Squats", sets = 2, reps = "8", warmupSets = 1, warmupReps = "12")),
+            0
+        )
+        assertEquals("12", steps.workSteps.first { it.isWarmup }.repsOrDurationLabel)
+    }
+
+    @Test fun warmupWeight_fallsBackToWorkingWeight() {
+        val steps = buildWorkoutSteps(
+            listOf(strength("Squats", sets = 2, weight = "135 lb", warmupSets = 1)),
+            0
+        )
+        assertEquals("135 lb", steps.workSteps.first { it.isWarmup }.weight)
+    }
+
+    @Test fun warmupWeight_overridesWorkingWeight() {
+        val steps = buildWorkoutSteps(
+            listOf(
+                strength(
+                    "Squats", sets = 2, weight = "135 lb",
+                    warmupSets = 1, warmupReps = "10", warmupWeight = "45 lb"
+                )
+            ),
+            0
+        )
+        val warmup = steps.workSteps.first { it.isWarmup }
+        assertEquals("45 lb", warmup.weight)
+    }
+
+    @Test fun warmupSets_haveZeroDurationAndNoSide() {
+        val steps = buildWorkoutSteps(
+            listOf(strength("Lunges", sets = 2, isPerSide = true, warmupSets = 1)),
+            0
+        )
+        val warmup = steps.workSteps.first { it.isWarmup }
+        assertEquals(0, warmup.durationSeconds)
+        assertEquals("", warmup.side)
+    }
+
+    @Test fun warmupSets_withRest_insertRestAfterEveryWarmup() {
+        val steps = buildWorkoutSteps(
+            listOf(strength("Squats", sets = 2, restSecs = 60, warmupSets = 1)),
+            0
+        )
+        // Warmup, Rest(60), Work, Rest(60), Work
+        assertEquals(5, steps.size)
+        assertTrue(steps[0] is WorkoutStep.Work && (steps[0] as WorkoutStep.Work).isWarmup)
+        assertTrue(steps[1] is WorkoutStep.Rest)
+        assertTrue(steps[2] is WorkoutStep.Work && !(steps[2] as WorkoutStep.Work).isWarmup)
+    }
+
+    @Test fun noWarmup_whenCountIsZero() {
+        val steps = buildWorkoutSteps(listOf(strength("Squats", sets = 2)), 0)
+        assertFalse(steps.workSteps.any { it.isWarmup })
     }
 }
 

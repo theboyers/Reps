@@ -1,5 +1,7 @@
 package net.theboyers.reps
 
+import androidx.core.content.ContextCompat
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import sh.calvin.reorderable.ReorderableItem
@@ -42,11 +45,16 @@ import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.FitnessCenter
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.LibraryBooks
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Restore
+import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
@@ -66,6 +74,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -144,7 +153,15 @@ data class RoutineEntry(
     val repsOrDuration: String,
     val restBetweenSetsSeconds: Int,
     val type: String = "STRENGTH",
-    val isPerSide: Boolean = false
+    val isPerSide: Boolean = false,
+    /** Canonical weight label for strength exercises (e.g. "135 lb"), or null when unspecified. */
+    val weight: String? = null,
+    /** Number of warmup sets performed before the working sets (0 = none). */
+    val warmupSets: Int = 0,
+    /** Reps for each warmup set; null/blank falls back to the working reps. */
+    val warmupReps: String? = null,
+    /** Canonical weight label for warmup sets; null/blank falls back to the working weight. */
+    val warmupWeight: String? = null
 )
 
 /** A named workout routine stored in the user's library. */
@@ -158,22 +175,42 @@ data class SavedRoutine(
     val savedAt: Long? = null
 )
 
+/** A completed workout, saved to the user's history. */
+data class WorkoutSession(
+    val id: String? = null,
+    val completedAt: Long = 0L,
+    val durationSeconds: Int = 0,
+    val setsCompleted: Int = 0,
+    val repsCompleted: Int = 0,
+    val volumeLb: Double = 0.0,
+    val volumeKg: Double = 0.0,
+    val routineName: String? = null,
+    val note: String? = null,
+    val exerciseNames: List<String> = emptyList()
+)
+
 val intensityOptions  = listOf("Easy", "Moderate", "Hard", "Max")
+// Ordered roughly head-to-toe, with whole-body and non-strength categories last.
 val muscleGroupOptions = listOf(
+    "Neck & Traps",
+    "Shoulders",
+    "Chest",
+    "Back & Lats",
+    "Triceps",
+    "Biceps",
+    "Forearms & Grip",
+    "Core & Abs",
+    "Obliques",
+    "Lower Back",
+    "Glutes",
+    "Hip Flexors",
+    "Adductors & Abductors",
+    "Quads",
+    "Hamstrings",
+    "Calves & Shins",
     "Full Body",
     "Upper Body",
     "Lower Body",
-    "Legs (Quads & Hamstrings)",
-    "Glutes & Hip Flexors",
-    "Calves",
-    "Core & Abs",
-    "Chest",
-    "Back (Lats & Traps)",
-    "Shoulders",
-    "Arms",
-    "Biceps",
-    "Triceps",
-    "Forearms",
     "Cardio / Endurance",
     "Stretching & Flexibility",
     "Other"
@@ -197,6 +234,11 @@ enum class RestUnit(val label: String, val secondsMultiplier: Int) {
     MINUTES("Minutes", 60)
 }
 
+enum class WeightUnit(val label: String) {
+    LB("lb"),
+    KG("kg")
+}
+
 enum class ExerciseType { STRENGTH, TIMED, CARDIO }
 
 /** Returns null if the input is valid, or a user-facing error message. */
@@ -215,6 +257,68 @@ fun parseRestSeconds(amountText: String, unit: RestUnit): Int? {
     if (amount < 0) return null
 
     return amount * unit.secondsMultiplier
+}
+
+/** Returns null if the weight input is valid (including blank or zero), or a user-facing error message. */
+fun validateWeight(amountText: String): String? {
+    if (amountText.isBlank()) return null
+    val amount = amountText.toDoubleOrNull() ?: return "Weight must be a number."
+    if (amount < 0) return "Weight cannot be negative."
+    return null
+}
+
+/**
+ * Formats a weight amount and unit into a canonical label (e.g. "135 lb", "2.5 kg").
+ * Returns null when the amount is blank or not a positive number.
+ */
+fun formatWeight(amountText: String, unit: WeightUnit): String? {
+    val amount = amountText.trim().toDoubleOrNull() ?: return null
+    if (amount <= 0) return null
+    val display = if (amount % 1.0 == 0.0) amount.toLong().toString() else amount.toString()
+    return "$display ${unit.label}"
+}
+
+/** Extracts the numeric portion of a canonical weight label (e.g. "135 lb" -> "135"). Blank when absent. */
+fun weightAmountOf(label: String?): String {
+    if (label.isNullOrBlank()) return ""
+    return label.trim().removeSuffix("lb").removeSuffix("kg").trim()
+}
+
+/** Keeps digits and at most a single decimal point from raw weight input. */
+fun sanitizeWeightInput(raw: String): String {
+    val filtered = raw.filter { it.isDigit() || it == '.' }
+    val firstDot = filtered.indexOf('.')
+    return if (firstDot == -1) filtered
+    else filtered.substring(0, firstDot + 1) + filtered.substring(firstDot + 1).replace(".", "")
+}
+
+/** Resolves the unit of a canonical weight label, defaulting to pounds when absent or unrecognised. */
+fun weightUnitOf(label: String?): WeightUnit =
+    if (label?.trim()?.lowercase()?.endsWith("kg") == true) WeightUnit.KG else WeightUnit.LB
+
+/**
+ * Appends a reps unit to a bare rep count for display (e.g. "12" -> "12 reps").
+ * Values that already carry text (e.g. "10/side", "45 sec", "AMRAP") are returned unchanged.
+ */
+fun formatRepsLabel(input: String): String {
+    val trimmed = input.trim()
+    if (trimmed.isBlank()) return ""
+    if (trimmed.any { it.isLetter() }) return trimmed
+    return if (trimmed == "1") "1 rep" else "$trimmed reps"
+}
+
+/** Restricts rep input to a bare number or a numeric range (e.g. "10" or "10-14"). */
+fun sanitizeRepsInput(raw: String): String {
+    val cleaned = raw.filter { it.isDigit() || it == '-' }
+    return (Regex("^\\d*(?:-\\d*)?").find(cleaned)?.value ?: "").trimStart('-')
+}
+
+/** Returns null if the reps input is a blank, a number, or a range; otherwise a user-facing error. */
+fun validateReps(input: String): String? {
+    val trimmed = input.trim()
+    if (trimmed.isBlank()) return null
+    return if (Regex("^\\d+(?:-\\d+)?$").matches(trimmed)) null
+           else "Reps must be a number or a range (e.g. 10 or 10-14)."
 }
 
 /** Returns the duration in seconds if the input is time-based (e.g. "45 sec", "2 min"), or null for rep-based entries. */
@@ -261,7 +365,10 @@ sealed class WorkoutStep {
         val totalSets: Int,
         val repsOrDurationLabel: String,
         val durationSeconds: Int,
-        val side: String = ""
+        val side: String = "",
+        val weight: String = "",
+        val isWarmup: Boolean = false,
+        val exerciseIndex: Int = 0
     ) : WorkoutStep()
 
     data class Rest(
@@ -281,6 +388,33 @@ fun buildWorkoutSteps(
         val sides = if (entry.isPerSide) listOf("Left", "Right") else listOf("")
         val totalSets = setsPerSide * sides.size
 
+        // Warmup sets (strength only) are emitted first, each followed by the
+        // exercise's rest so the user is recovered before the working sets begin.
+        val warmupCount = entry.warmupSets.coerceAtLeast(0)
+        if (warmupCount > 0) {
+            val warmupReps = entry.warmupReps?.takeIf { it.isNotBlank() } ?: entry.repsOrDuration
+            val warmupWeight = entry.warmupWeight?.takeIf { it.isNotBlank() } ?: entry.weight.orEmpty()
+            repeat(warmupCount) { wIdx ->
+                steps.add(
+                    WorkoutStep.Work(
+                        exerciseName = entry.exerciseName,
+                        details = entry.details,
+                        setNumber = wIdx + 1,
+                        totalSets = warmupCount,
+                        repsOrDurationLabel = warmupReps,
+                        durationSeconds = 0,
+                        side = "",
+                        weight = warmupWeight,
+                        isWarmup = true,
+                        exerciseIndex = exIdx
+                    )
+                )
+                if (entry.restBetweenSetsSeconds > 0) {
+                    steps.add(WorkoutStep.Rest(durationSeconds = entry.restBetweenSetsSeconds, upNextName = ""))
+                }
+            }
+        }
+
         var stepNum = 0
         repeat(setsPerSide) { setIdx ->
             sides.forEachIndexed { sideIdx, side ->
@@ -293,7 +427,9 @@ fun buildWorkoutSteps(
                         totalSets = totalSets,
                         repsOrDurationLabel = entry.repsOrDuration,
                         durationSeconds = parseWorkDurationSeconds(entry.repsOrDuration) ?: 0,
-                        side = side
+                        side = side,
+                        weight = entry.weight.orEmpty(),
+                        exerciseIndex = exIdx
                     )
                 )
                 val isLastStep = setIdx == setsPerSide - 1 && sideIdx == sides.lastIndex
@@ -314,6 +450,178 @@ fun buildWorkoutSteps(
     return steps
 }
 
+/** A timed audio cue scheduled at an absolute wall-clock time. */
+enum class AudioCueType { TICK, REST_END, TIMER_END }
+
+data class AudioCue(val atMillis: Long, val type: AudioCueType)
+
+/**
+ * Builds the timed audio-cue schedule for the workout from [fromIndex] onwards.
+ *
+ * [fromEndTimeMs] is the wall-clock time the current step ends (0 for a
+ * rep-based step, which waits for the user). Walks forward through consecutive
+ * timed steps until it reaches a rep-based step, whose end is unknown:
+ *  - the final five seconds of every rest produce a [AudioCueType.TICK]
+ *  - the end of every rest produces a [AudioCueType.REST_END] ("next up") tone
+ *  - the end of a timed work step produces a [AudioCueType.TIMER_END] tone
+ *
+ * Cues already in the past (relative to [nowMs]) are dropped.
+ */
+fun buildAudioCueSchedule(
+    steps: List<WorkoutStep>,
+    fromIndex: Int,
+    fromEndTimeMs: Long,
+    nowMs: Long
+): List<AudioCue> {
+    if (fromEndTimeMs <= 0L || fromIndex !in steps.indices) return emptyList()
+
+    val cues = mutableListOf<AudioCue>()
+
+    fun addCuesFor(step: WorkoutStep, endMs: Long) {
+        when (step) {
+            is WorkoutStep.Rest -> {
+                for (secsBefore in 5 downTo 1) {
+                    val at = endMs - secsBefore * 1000L
+                    if (at > nowMs) cues.add(AudioCue(at, AudioCueType.TICK))
+                }
+                if (endMs > nowMs) cues.add(AudioCue(endMs, AudioCueType.REST_END))
+            }
+            is WorkoutStep.Work -> {
+                if (endMs > nowMs) cues.add(AudioCue(endMs, AudioCueType.TIMER_END))
+            }
+        }
+    }
+
+    var index = fromIndex
+    var endMs = fromEndTimeMs
+    addCuesFor(steps[index], endMs)
+
+    index++
+    while (index < steps.size) {
+        val step = steps[index]
+        val dur = when (step) {
+            is WorkoutStep.Work -> step.durationSeconds
+            is WorkoutStep.Rest -> step.durationSeconds
+        }
+        if (dur <= 0) break // rep-based step — wait for the user
+        endMs += dur * 1000L
+        addCuesFor(step, endMs)
+        index++
+    }
+
+    return cues.sortedBy { it.atMillis }
+}
+
+/**
+ * Returns the index (into the routine entries) of the exercise the workout is
+ * currently on or about to start, based on the next work step at or after
+ * [currentStepIndex] (falling back to the preceding one at the very end).
+ */
+fun currentExerciseIndex(steps: List<WorkoutStep>, currentStepIndex: Int): Int {
+    if (currentStepIndex !in steps.indices) return -1
+    for (i in currentStepIndex until steps.size) {
+        val s = steps[i]
+        if (s is WorkoutStep.Work) return s.exerciseIndex
+    }
+    for (i in currentStepIndex downTo 0) {
+        val s = steps[i]
+        if (s is WorkoutStep.Work) return s.exerciseIndex
+    }
+    return -1
+}
+
+/**
+ * True when the workout is positioned before [exerciseIndex] has performed any
+ * set — i.e. it can be deferred ("machine busy") without disturbing progress.
+ */
+fun canDeferExercise(steps: List<WorkoutStep>, currentStepIndex: Int, exerciseIndex: Int): Boolean {
+    if (exerciseIndex < 0) return false
+    return when (val step = steps.getOrNull(currentStepIndex)) {
+        // First set (or first warmup) of the exercise, not yet performed.
+        is WorkoutStep.Work -> step.exerciseIndex == exerciseIndex && step.setNumber == 1
+        // A rest that leads into the next exercise.
+        is WorkoutStep.Rest -> step.upNextName.isNotBlank()
+        null -> false
+    }
+}
+
+/** Returns [list] with the item at [from] moved to [to]. */
+fun <T> moveWithin(list: List<T>, from: Int, to: Int): List<T> {
+    if (from !in list.indices || to !in list.indices || from == to) return list
+    val mutable = list.toMutableList()
+    mutable.add(to, mutable.removeAt(from))
+    return mutable
+}
+
+/**
+ * Index of the first step belonging to [exerciseIndex], or -1 when that
+ * exercise is no longer present — used to resume after cancelling an exercise.
+ */
+fun firstStepOfExercise(steps: List<WorkoutStep>, exerciseIndex: Int): Int =
+    steps.indexOfFirst { it is WorkoutStep.Work && it.exerciseIndex == exerciseIndex }
+
+/** Shifts every number in a rep value by [delta] (e.g. "10-14" + 1 -> "11-15"). */
+fun shiftReps(input: String, delta: Int): String {
+    val trimmed = input.trim()
+    if (trimmed.isEmpty()) return if (delta > 0) "1" else ""
+    var found = false
+    val shifted = Regex("\\d+").replace(trimmed) { match ->
+        found = true
+        val value = (match.value.toIntOrNull() ?: 0) + delta
+        value.coerceAtLeast(0).toString()
+    }
+    return if (found) shifted else trimmed
+}
+
+/** Adjusts a weight label by [delta] in [unit]; returns null when it drops to nothing. */
+fun shiftWeight(label: String?, delta: Double, unit: WeightUnit): String? {
+    val current = weightAmountOf(label).toDoubleOrNull() ?: 0.0
+    val next = current + delta
+    if (next <= 0) return null
+    val amount = if (next % 1.0 == 0.0) next.toLong().toString() else next.toString()
+    return formatWeight(amount, unit)
+}
+
+/** A representative rep count from a reps label (first number), or null when none. */
+fun representativeReps(repsLabel: String): Int? =
+    Regex("\\d+").find(repsLabel)?.value?.toIntOrNull()
+
+/** Totals gathered from the work sets the user actually completed. */
+data class WorkoutStats(
+    val setsCompleted: Int = 0,
+    val repsCompleted: Int = 0,
+    val volumeLb: Double = 0.0,
+    val volumeKg: Double = 0.0
+)
+
+/** Sums completed work sets into sets, reps, and volume (kept per unit). */
+fun computeWorkoutStats(completed: List<WorkoutStep.Work>): WorkoutStats {
+    var sets = 0
+    var reps = 0
+    var volumeLb = 0.0
+    var volumeKg = 0.0
+    completed.forEach { work ->
+        sets++
+        // Only rep-based sets contribute reps and volume; timed sets do not.
+        if (work.durationSeconds == 0) {
+            val repCount = representativeReps(work.repsOrDurationLabel) ?: 0
+            reps += repCount
+            val weight = weightAmountOf(work.weight).toDoubleOrNull() ?: 0.0
+            if (weight > 0 && repCount > 0) {
+                if (weightUnitOf(work.weight) == WeightUnit.KG) volumeKg += weight * repCount
+                else volumeLb += weight * repCount
+            }
+        }
+    }
+    return WorkoutStats(sets, reps, volumeLb, volumeKg)
+}
+
+/** Formats a volume number with thousands separators and no unnecessary decimals. */
+fun formatVolume(value: Double): String {
+    val rounded = Math.round(value).toLong()
+    return String.format(Locale.US, "%,d", rounded)
+}
+
 /** Main screen composable. Manages the full workout lifecycle: editing, grace period, active workout, and completion. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -322,12 +630,19 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     var details by rememberSaveable { mutableStateOf("") }
     var sets by rememberSaveable { mutableStateOf("") }
     var repsOrDuration by rememberSaveable { mutableStateOf("") }
-    var restBetweenSetsAmount by rememberSaveable { mutableStateOf("") }
+    var restBetweenSetsAmount by rememberSaveable { mutableStateOf("90") }
     var restBetweenSetsUnit by rememberSaveable { mutableStateOf(RestUnit.SECONDS) }
     var durationAmount by rememberSaveable { mutableStateOf("") }
     var durationUnit by rememberSaveable { mutableStateOf(RestUnit.MINUTES) }
     var exerciseType by rememberSaveable { mutableStateOf(ExerciseType.STRENGTH) }
     var isPerSide by rememberSaveable { mutableStateOf(false) }
+    var weightAmount by rememberSaveable { mutableStateOf("") }
+    var weightUnit by rememberSaveable { mutableStateOf(WeightUnit.LB) }
+    var warmupEnabled by rememberSaveable { mutableStateOf(false) }
+    var warmupSets by rememberSaveable { mutableStateOf("1") }
+    var warmupReps by rememberSaveable { mutableStateOf("") }
+    var warmupWeightAmount by rememberSaveable { mutableStateOf("") }
+    var warmupWeightUnit by rememberSaveable { mutableStateOf(WeightUnit.LB) }
     var routineRestBetweenExercisesAmount by rememberSaveable { mutableStateOf("") }
     var routineRestBetweenExercisesUnit by rememberSaveable { mutableStateOf(RestUnit.SECONDS) }
     val routineRestBetweenExercisesSeconds = parseRestSeconds(routineRestBetweenExercisesAmount, routineRestBetweenExercisesUnit) ?: 0
@@ -345,12 +660,19 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         details = ""
         sets = ""
         repsOrDuration = ""
-        restBetweenSetsAmount = ""
+        restBetweenSetsAmount = "90"
         restBetweenSetsUnit = RestUnit.SECONDS
         durationAmount = ""
         durationUnit = RestUnit.MINUTES
         exerciseType = ExerciseType.STRENGTH
         isPerSide = false
+        weightAmount = ""
+        weightUnit = WeightUnit.LB
+        warmupEnabled = false
+        warmupSets = "1"
+        warmupReps = ""
+        warmupWeightAmount = ""
+        warmupWeightUnit = WeightUnit.LB
         errorMessage = null
         editingIndex = null
     }
@@ -362,6 +684,13 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         sets = e.sets
         repsOrDuration = e.repsOrDuration
         isPerSide = e.isPerSide
+        weightAmount = weightAmountOf(e.weight)
+        weightUnit = weightUnitOf(e.weight)
+        warmupEnabled = e.warmupSets > 0
+        warmupSets = if (e.warmupSets > 0) e.warmupSets.toString() else "1"
+        warmupReps = e.warmupReps.orEmpty()
+        warmupWeightAmount = weightAmountOf(e.warmupWeight)
+        warmupWeightUnit = weightUnitOf(e.warmupWeight)
         val sec = e.restBetweenSetsSeconds
         if (sec > 0 && sec % 60 == 0) {
             restBetweenSetsAmount = (sec / 60).toString()
@@ -393,6 +722,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     var isPaused by rememberSaveable { mutableStateOf(false) }
     var graceSecondsRemaining by rememberSaveable { mutableIntStateOf(10) }
     var currentStepIndex by rememberSaveable { mutableIntStateOf(0) }
+    var planVersion by remember { mutableIntStateOf(0) }
+    var adjustSheetExIdx by remember { mutableStateOf<Int?>(null) }
+    var cancelExerciseConfirmIdx by remember { mutableStateOf<Int?>(null) }
     var timerSecondsRemaining by rememberSaveable { mutableIntStateOf(0) }
     var workoutStartTimeMs    by rememberSaveable { mutableStateOf(0L) }
     var workoutEndTimeMs      by rememberSaveable { mutableStateOf(0L) }
@@ -404,6 +736,11 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     // Derived workout step sequence, rebuilt whenever entries or rest settings change.
     val workoutSteps = buildWorkoutSteps(routineEntries, routineRestBetweenExercisesSeconds)
     val currentStep = workoutSteps.getOrNull(currentStepIndex)
+    val currentWorkStep = currentStep as? WorkoutStep.Work
+    val upcomingExerciseIndex = currentExerciseIndex(workoutSteps, currentStepIndex)
+    val canDeferCurrentExercise =
+        canDeferExercise(workoutSteps, currentStepIndex, upcomingExerciseIndex) &&
+            upcomingExerciseIndex in 0 until routineEntries.lastIndex
 
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
@@ -411,13 +748,29 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     val prefs = remember { context.getSharedPreferences("reps_prefs", android.content.Context.MODE_PRIVATE) }
     val gson = remember { Gson() }
 
-    // Audio tone for timer completion.
+    // Audio tone for timer completion (used when background audio is off).
     val toneGen = remember { android.media.ToneGenerator(android.media.AudioManager.STREAM_MUSIC, 90) }
-    DisposableEffect(Unit) { onDispose { toneGen.release() } }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            toneGen.release()
+            context.startService(WorkoutAudioService.stopIntent(context))
+        }
+    }
+
+    // Tracks whether the foreground audio service is currently running so we
+    // don't repeatedly start/stop it on every recomposition.
+    var audioServiceStarted by remember { mutableStateOf(false) }
 
 
     var hasSavedRoutine by remember { mutableStateOf(false) }
     val savedRoutines = remember { mutableStateListOf<SavedRoutine>() }
+    val workoutHistory = remember { mutableStateListOf<WorkoutSession>() }
+    var showHistorySheet by remember { mutableStateOf(false) }
+    val historySheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var workoutNote by rememberSaveable { mutableStateOf("") }
+    var historySaved by remember { mutableStateOf(false) }
+    val completedWorkSteps = remember { mutableStateListOf<WorkoutStep.Work>() }
     var editingRoutine by remember { mutableStateOf<SavedRoutine?>(null) }
     var showSaveSheet   by remember { mutableStateOf(false) }
     var showLoadSheet   by remember { mutableStateOf(false) }
@@ -432,6 +785,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
 
     // Persisted user preferences loaded from SharedPreferences.
     var soundEnabled                 by rememberSaveable { mutableStateOf(true) }
+    var backgroundAudioEnabled       by rememberSaveable { mutableStateOf(true) }
     var gracePeriodPref              by rememberSaveable { mutableIntStateOf(10) }
     var keepScreenOn                 by rememberSaveable { mutableStateOf(true) }
     var themePreference              by rememberSaveable { mutableStateOf("system") }
@@ -460,6 +814,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     // Migrates any legacy single-routine data to the current multi-routine format.
     LaunchedEffect(Unit) {
         soundEnabled    = prefs.getBoolean("pref_sound_enabled", true)
+        backgroundAudioEnabled = prefs.getBoolean("pref_background_audio", true)
         gracePeriodPref = prefs.getInt("pref_grace_period", 10)
         keepScreenOn    = prefs.getBoolean("pref_keep_screen_on", true)
         themePreference = prefs.getString("pref_theme", "system") ?: "system"
@@ -500,11 +855,24 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             }
         }
         hasSavedRoutine = savedRoutines.isNotEmpty()
+
+        val historyJson = prefs.getString("workout_history", null)
+        if (historyJson != null) {
+            try {
+                val historyType = object : TypeToken<List<WorkoutSession>>() {}.type
+                val history: List<WorkoutSession> = gson.fromJson(historyJson, historyType) ?: emptyList()
+                workoutHistory.addAll(history)
+            } catch (_: Exception) {}
+        }
     }
 
     fun persistLibrary() {
         prefs.edit().putString("saved_routines", gson.toJson(savedRoutines.toList())).apply()
         hasSavedRoutine = savedRoutines.isNotEmpty()
+    }
+
+    fun persistHistory() {
+        prefs.edit().putString("workout_history", gson.toJson(workoutHistory.toList())).apply()
     }
 
     fun saveRoutineToLibrary(name: String, intensity: String, muscleGroup: String) {
@@ -531,6 +899,25 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 if (existing != null) "\"${routine.name}\" updated!" else "Routine saved to library!"
             )
         }
+    }
+
+    fun saveWorkoutToHistory(stats: WorkoutStats, durationSeconds: Int) {
+        val session = WorkoutSession(
+            id = UUID.randomUUID().toString(),
+            completedAt = System.currentTimeMillis(),
+            durationSeconds = durationSeconds,
+            setsCompleted = stats.setsCompleted,
+            repsCompleted = stats.repsCompleted,
+            volumeLb = stats.volumeLb,
+            volumeKg = stats.volumeKg,
+            routineName = editingRoutine?.name,
+            note = workoutNote.trim().ifBlank { null },
+            exerciseNames = routineEntries.map { it.exerciseName }
+        )
+        workoutHistory.add(0, session)
+        persistHistory()
+        historySaved = true
+        coroutineScope.launch { snackbarHostState.showSnackbar("Workout saved to history!") }
     }
 
     fun openRoutineForEditing(routine: SavedRoutine) {
@@ -570,8 +957,19 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         persistLibrary()
     }
 
-    /** Advances to the next step and seeds its countdown timer. Marks the workout complete if there are no more steps. */
-    fun advanceStep() {
+    /**
+     * Advances to the next step and seeds its countdown timer. Marks the workout
+     * complete if there are no more steps.
+     *
+     * [anchorMs] chains timed steps off the previous step's scheduled end so the
+     * workout catches up correctly after the app has been backgrounded, instead
+     * of drifting from "now". Manual skips pass null to start the next step now.
+     */
+    fun advanceStep(anchorMs: Long? = null, recordCompletion: Boolean = true) {
+        if (recordCompletion) {
+            (workoutSteps.getOrNull(currentStepIndex) as? WorkoutStep.Work)
+                ?.let { completedWorkSteps.add(it) }
+        }
         val nextIdx = currentStepIndex + 1
         if (nextIdx >= workoutSteps.size) {
             workoutEndTimeMs = System.currentTimeMillis()
@@ -583,7 +981,136 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 is WorkoutStep.Rest -> s.durationSeconds
             }
             timerSecondsRemaining = dur
-            stepEndTimeMs = if (dur > 0) System.currentTimeMillis() + dur * 1000L else 0L
+            val base = anchorMs ?: System.currentTimeMillis()
+            stepEndTimeMs = if (dur > 0) base + dur * 1000L else 0L
+        }
+    }
+
+    /**
+     * Publishes the current timed-cue schedule to the foreground audio service
+     * (or stops it) so ticks and tones fire on time with the screen off.
+     */
+    fun updateWorkoutAudio() {
+        val delegate = soundEnabled && backgroundAudioEnabled
+        if (!delegate || workoutPhase != WorkoutPhase.RUNNING || isPaused) {
+            if (audioServiceStarted) {
+                context.startService(WorkoutAudioService.stopIntent(context))
+                audioServiceStarted = false
+            }
+            return
+        }
+        val cues = buildAudioCueSchedule(
+            steps = workoutSteps,
+            fromIndex = currentStepIndex,
+            fromEndTimeMs = stepEndTimeMs,
+            nowMs = System.currentTimeMillis()
+        )
+        if (cues.isEmpty()) {
+            // Nothing timed pending (e.g. waiting on a rep-based step) — let the
+            // device sleep and release the foreground service.
+            if (audioServiceStarted) {
+                context.startService(WorkoutAudioService.stopIntent(context))
+                audioServiceStarted = false
+            }
+            return
+        }
+        try {
+            ContextCompat.startForegroundService(
+                context,
+                WorkoutAudioService.scheduleIntent(
+                    context,
+                    cues.map { it.atMillis }.toLongArray(),
+                    cues.map { it.type.ordinal }.toIntArray()
+                )
+            )
+            audioServiceStarted = true
+        } catch (_: Exception) {
+            // Foreground start can be refused if the app is not visible; the
+            // in-app tone generator still covers the foreground case.
+            audioServiceStarted = false
+        }
+    }
+
+    /** Seeds the countdown timer for the step at [index] in [steps]. */
+    fun seedTimer(steps: List<WorkoutStep>, index: Int) {
+        val dur = when (val s = steps.getOrNull(index)) {
+            is WorkoutStep.Work -> s.durationSeconds
+            is WorkoutStep.Rest -> s.durationSeconds
+            null -> 0
+        }
+        timerSecondsRemaining = dur
+        stepEndTimeMs = if (dur > 0) System.currentTimeMillis() + dur * 1000L else 0L
+    }
+
+    /** Re-seeds the current step's countdown after the plan changes underneath it. */
+    fun seedCurrentStepTimer() = seedTimer(workoutSteps, currentStepIndex)
+
+    /** Moves an exercise (and its parallel id) within the routine, keeping edit state sane. */
+    fun moveEntry(from: Int, to: Int) {
+        if (from !in routineEntries.indices || to !in routineEntries.indices || from == to) return
+        val entry = routineEntries.removeAt(from)
+        val id = entryIds.removeAt(from)
+        routineEntries.add(to, entry)
+        entryIds.add(to, id)
+        editingIndex = editingIndex?.let { idx ->
+            when {
+                idx == from -> to
+                from < to && idx in (from + 1)..to -> idx - 1
+                from > to && idx in to until from -> idx + 1
+                else -> idx
+            }
+        }
+        planVersion++
+    }
+
+    /** Applies [transform] to the exercise currently in play. */
+    fun updateCurrentExercise(transform: (RoutineEntry) -> RoutineEntry) {
+        val idx = adjustSheetExIdx ?: upcomingExerciseIndex
+        if (idx !in routineEntries.indices) return
+        routineEntries[idx] = transform(routineEntries[idx])
+        planVersion++
+    }
+
+    /** Defers the current exercise to the end of the routine ("machine busy — do later"). */
+    fun doLaterCurrentExercise() {
+        val idx = upcomingExerciseIndex
+        val canDefer = canDeferExercise(workoutSteps, currentStepIndex, idx)
+        if (!canDefer || idx >= routineEntries.lastIndex) return
+        moveEntry(idx, routineEntries.lastIndex)
+        // The step at the current index may now belong to a different exercise.
+        seedCurrentStepTimer()
+    }
+
+    /** Moves an upcoming exercise to run immediately after the current one ("do this next"). */
+    fun doThisNext(exerciseIdx: Int) {
+        val current = upcomingExerciseIndex
+        if (current < 0 || exerciseIdx !in routineEntries.indices) return
+        if (exerciseIdx <= current) return
+        moveEntry(exerciseIdx, current + 1)
+    }
+
+    /** Removes an exercise from the workout entirely, resuming at the next exercise. */
+    fun cancelExercise(entryIndex: Int) {
+        if (entryIndex !in routineEntries.indices) return
+        routineEntries.removeAt(entryIndex)
+        if (entryIndex < entryIds.size) entryIds.removeAt(entryIndex)
+        editingIndex = editingIndex?.let { idx ->
+            when {
+                idx == entryIndex -> null
+                idx > entryIndex -> idx - 1
+                else -> idx
+            }
+        }
+        planVersion++
+        val newSteps = buildWorkoutSteps(routineEntries, routineRestBetweenExercisesSeconds)
+        // After removal the following exercise takes entryIndex's slot; resume there.
+        val resume = firstStepOfExercise(newSteps, entryIndex)
+        if (resume < 0) {
+            workoutEndTimeMs = System.currentTimeMillis()
+            workoutPhase = WorkoutPhase.COMPLETE
+        } else {
+            currentStepIndex = resume
+            seedTimer(newSteps, resume)
         }
     }
 
@@ -687,7 +1214,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
 
     // Per-step countdown timer; auto-advances to the next step on expiry.
     // Uses wall-clock time so the timer continues correctly when the app is backgrounded.
-    LaunchedEffect(workoutPhase, isPaused, currentStepIndex) {
+    LaunchedEffect(workoutPhase, isPaused, currentStepIndex, planVersion) {
         if (workoutPhase != WorkoutPhase.RUNNING || isPaused || stepEndTimeMs == 0L) return@LaunchedEffect
         while (true) {
             val remaining = kotlin.math.ceil(
@@ -698,12 +1225,28 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 val step = workoutSteps.getOrNull(currentStepIndex)
                 val shouldDing = step is WorkoutStep.Rest ||
                     (step is WorkoutStep.Work && step.durationSeconds > 0)
-                if (shouldDing && soundEnabled) toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 600)
-                advanceStep()
+                // Only beep if this step ended roughly on time — avoids a burst of
+                // dings when catching up after being backgrounded.
+                val onTime = System.currentTimeMillis() - stepEndTimeMs < 1_500L
+                // When background audio is enabled the service owns all timed cues.
+                val playHere = soundEnabled && !backgroundAudioEnabled && onTime
+                if (shouldDing && playHere) {
+                    toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 600)
+                }
+                advanceStep(anchorMs = stepEndTimeMs)
                 break
             }
             delay(100)
         }
+    }
+
+    // Publishes the timed-cue schedule to the foreground audio service whenever
+    // the running state changes, so ticks/tones fire with the screen off.
+    LaunchedEffect(
+        workoutPhase, currentStepIndex, isPaused, stepEndTimeMs,
+        soundEnabled, backgroundAudioEnabled, planVersion
+    ) {
+        updateWorkoutAudio()
     }
 
     val hapticFeedback = LocalHapticFeedback.current
@@ -764,6 +1307,12 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 ),
                 actions = {
                     if (workoutPhase == WorkoutPhase.EDITING) {
+                        IconButton(
+                            onClick = { showHistorySheet = true },
+                            enabled = workoutHistory.isNotEmpty()
+                        ) {
+                            Icon(Icons.Rounded.History, contentDescription = "Workout history")
+                        }
                         IconButton(onClick = { showSettingsSheet = true }) {
                             Icon(Icons.Rounded.Settings, contentDescription = "Routine settings")
                         }
@@ -771,13 +1320,13 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             onClick = { showSaveSheet = true },
                             enabled = routineEntries.isNotEmpty()
                         ) {
-                            Icon(Icons.Rounded.Bookmark, contentDescription = "Save routine")
+                            Icon(Icons.Rounded.Save, contentDescription = "Save routine")
                         }
                         IconButton(
                             onClick = { showLoadSheet = true },
                             enabled = savedRoutines.isNotEmpty()
                         ) {
-                            Icon(Icons.Rounded.Restore, contentDescription = "Load routine")
+                            Icon(Icons.Rounded.LibraryBooks, contentDescription = "Load routine")
                         }
                     }
                 }
@@ -1013,7 +1562,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                                     add("${setsInt} set${if (setsInt != 1) "s" else ""}")
                                                 }
                                             }
-                                            if (entry.repsOrDuration.isNotBlank()) add(entry.repsOrDuration)
+                                            if (entry.repsOrDuration.isNotBlank()) add(formatRepsLabel(entry.repsOrDuration))
+                                            entry.weight?.takeIf { it.isNotBlank() }?.let { add(it) }
+                                            if (entry.warmupSets > 0) add("${entry.warmupSets} warmup")
                                             if (entry.restBetweenSetsSeconds > 0) add("${formatDuration(entry.restBetweenSetsSeconds)} rest")
                                         }.joinToString(" · ")
                                         if (meta.isNotBlank()) {
@@ -1157,6 +1708,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                         graceEndTimeMs = System.currentTimeMillis() + gracePeriodPref * 1000L
                                         stepEndTimeMs = 0L
                                         pausedAtMs = 0L
+                                        completedWorkSteps.clear()
+                                        workoutNote = ""
+                                        historySaved = false
                                     },
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1269,7 +1823,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                 val subtitle = buildList {
                                     val isTimed = parseWorkDurationSeconds(entry.repsOrDuration) != null
                                     if (entry.sets.isNotBlank() && !(isTimed && entry.sets == "1")) add("${entry.sets} sets")
-                                    if (entry.repsOrDuration.isNotBlank()) add(entry.repsOrDuration)
+                                    if (entry.repsOrDuration.isNotBlank()) add(formatRepsLabel(entry.repsOrDuration))
+                                    entry.weight?.takeIf { it.isNotBlank() }?.let { add(it) }
+                                    if (entry.warmupSets > 0) add("${entry.warmupSets} warmup")
                                     if (entry.details.isNotBlank()) add(entry.details)
                                 }.joinToString(" · ")
                                 if (subtitle.isNotBlank()) {
@@ -1356,6 +1912,12 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             )
                         }
                         // Scrollable workout step timeline.
+                        val exerciseStartIndices = buildSet {
+                            val seen = mutableSetOf<Int>()
+                            workoutSteps.forEachIndexed { i, s ->
+                                if (s is WorkoutStep.Work && seen.add(s.exerciseIndex)) add(i)
+                            }
+                        }
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -1371,7 +1933,31 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                     totalSteps = workoutSteps.size,
                                     timerSeconds = timerSecondsRemaining,
                                     isPaused = isPaused,
-                                    countUp = countUp
+                                    countUp = countUp,
+                                    onAdjust = {
+                                        if (upcomingExerciseIndex in routineEntries.indices) {
+                                            adjustSheetExIdx = upcomingExerciseIndex
+                                        }
+                                    },
+                                    onMarkComplete = {
+                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        advanceStep()
+                                    },
+                                    onSkip = {
+                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        advanceStep(recordCompletion = false)
+                                    },
+                                    onCancelExercise = {
+                                        if (upcomingExerciseIndex in routineEntries.indices) {
+                                            cancelExerciseConfirmIdx = upcomingExerciseIndex
+                                        }
+                                    },
+                                    showDoNext = step is WorkoutStep.Work &&
+                                        index in exerciseStartIndices &&
+                                        step.exerciseIndex != upcomingExerciseIndex,
+                                    onDoNext = {
+                                        (step as? WorkoutStep.Work)?.let { doThisNext(it.exerciseIndex) }
+                                    }
                                 )
                             }
                         }
@@ -1390,47 +1976,13 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             .padding(horizontal = 20.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = { handlePauseToggle() },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .semantics { testTag = "btn_pause_continue" },
-                                shape = RoundedCornerShape(12.dp)
-                            ) { Text(if (isPaused) "Continue" else "Pause") }
-                            if (isRepBased) {
-                                Button(
-                                    enabled = !isPaused,
-                                    onClick = {
-                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        advanceStep()
-                                    },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .semantics { testTag = "btn_done" },
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Icon(Icons.Rounded.Check, null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.size(6.dp))
-                                    Text("Done")
-                                }
-                            } else {
-                                OutlinedButton(
-                                    enabled = !isPaused,
-                                    onClick = {
-                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        advanceStep()
-                                    },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .semantics { testTag = "btn_skip" },
-                                    shape = RoundedCornerShape(12.dp)
-                                ) { Text(if (isRestStep) "Skip Rest" else "Skip") }
-                            }
-                        }
+                        OutlinedButton(
+                            onClick = { handlePauseToggle() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics { testTag = "btn_pause_continue" },
+                            shape = RoundedCornerShape(12.dp)
+                        ) { Text(if (isPaused) "Continue" else "Pause") }
                         TextButton(
                             onClick = { workoutPhase = WorkoutPhase.EDITING },
                             modifier = Modifier
@@ -1450,6 +2002,11 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             WorkoutPhase.COMPLETE -> {
                 val elapsedSecs = if (workoutStartTimeMs > 0L && workoutEndTimeMs > workoutStartTimeMs)
                     ((workoutEndTimeMs - workoutStartTimeMs) / 1000L).toInt() else 0
+                val stats = computeWorkoutStats(completedWorkSteps.toList())
+                val volumeText = buildList {
+                    if (stats.volumeLb > 0) add("${formatVolume(stats.volumeLb)} lb")
+                    if (stats.volumeKg > 0) add("${formatVolume(stats.volumeKg)} kg")
+                }.joinToString(" + ")
 
                 Column(
                     modifier = Modifier
@@ -1475,6 +2032,70 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             style = MaterialTheme.typography.headlineSmall,
                             color = MaterialTheme.colorScheme.primary,
                             textAlign = TextAlign.Center
+                        )
+                    }
+                    Spacer(Modifier.height(20.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        StatCard(
+                            label = "Duration",
+                            value = if (elapsedSecs > 0) formatDuration(elapsedSecs) else "—",
+                            modifier = Modifier.weight(1f)
+                        )
+                        StatCard(
+                            label = "Sets done",
+                            value = stats.setsCompleted.toString(),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        StatCard(
+                            label = "Reps done",
+                            value = if (stats.repsCompleted > 0) stats.repsCompleted.toString() else "—",
+                            modifier = Modifier.weight(1f)
+                        )
+                        StatCard(
+                            label = "Weight lifted",
+                            value = volumeText.ifBlank { "—" },
+                            modifier = Modifier
+                                .weight(1f)
+                                .semantics { testTag = "stat_volume" }
+                        )
+                    }
+                    Spacer(Modifier.height(24.dp))
+                    OutlinedTextField(
+                        value = workoutNote,
+                        onValueChange = { workoutNote = it },
+                        label = { Text("Note (optional)") },
+                        placeholder = { Text("How did it feel?") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { testTag = "field_workout_note" },
+                        minLines = 2,
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Button(
+                        onClick = { saveWorkoutToHistory(stats, elapsedSecs) },
+                        enabled = !historySaved,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { testTag = "btn_save_history" },
+                        shape = RoundedCornerShape(14.dp),
+                        contentPadding = PaddingValues(vertical = 14.dp)
+                    ) {
+                        Icon(Icons.Rounded.Bookmark, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text(
+                            if (historySaved) "Saved to history" else "Save to history",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
                         )
                     }
                     Spacer(Modifier.height(28.dp))
@@ -1517,8 +2138,14 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                         if (entry.isPerSide) add("${setsInt * 2} sets (${setsInt}/side)")
                                         else add("$setsInt set${if (setsInt != 1) "s" else ""}")
                                     }
-                                    if (entry.repsOrDuration.isNotBlank()) add(entry.repsOrDuration)
-                                }.joinToString(" × ")
+                                    if (entry.repsOrDuration.isNotBlank()) add(formatRepsLabel(entry.repsOrDuration))
+                                }.joinToString(" × ").let { base ->
+                                    buildList {
+                                        if (base.isNotBlank()) add(base)
+                                        entry.weight?.takeIf { it.isNotBlank() }?.let { add(it) }
+                                        if (entry.warmupSets > 0) add("${entry.warmupSets} warmup")
+                                    }.joinToString(" · ")
+                                }
                                 if (summary.isNotBlank()) {
                                     Text(
                                         summary,
@@ -1654,6 +2281,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp)
                     .padding(bottom = 32.dp)
                     .semantics { testTag = "exercise_form_sheet" },
@@ -1690,8 +2318,16 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                     durationAmount = ""
                                     durationUnit = RestUnit.MINUTES
                                     details = ""
-                                    restBetweenSetsAmount = ""
+                                    // Default rest between sets to 90s; cardio has no sets, so leave it blank.
+                                    restBetweenSetsAmount = if (type == ExerciseType.CARDIO) "" else "90"
                                     isPerSide = false
+                                    weightAmount = ""
+                                    weightUnit = WeightUnit.LB
+                                    warmupEnabled = false
+                                    warmupSets = "1"
+                                    warmupReps = ""
+                                    warmupWeightAmount = ""
+                                    warmupWeightUnit = WeightUnit.LB
                                     errorMessage = null
                                 }
                             },
@@ -1836,6 +2472,15 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                 }
                             }
                         }
+                        WeightInput(
+                            modifier = Modifier.fillMaxWidth(),
+                            label = "Weight (optional)",
+                            amount = weightAmount,
+                            onAmountChange = { weightAmount = it },
+                            unit = weightUnit,
+                            onUnitChange = { weightUnit = it },
+                            amountTestTag = "field_weight"
+                        )
                         RestDurationInput(
                             modifier = Modifier.fillMaxWidth(),
                             label = "Rest between sets",
@@ -1899,14 +2544,25 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             )
                             OutlinedTextField(
                                 value = repsOrDuration,
-                                onValueChange = { repsOrDuration = it },
+                                onValueChange = { repsOrDuration = sanitizeRepsInput(it) },
                                 label = { Text("Reps") },
-                                placeholder = { Text("10, 8-12, 10/side") },
-                                modifier = Modifier.weight(0.65f),
+                                placeholder = { Text("e.g. 10 or 10-14") },
+                                modifier = Modifier
+                                    .weight(0.65f)
+                                    .semantics { testTag = "field_reps" },
                                 singleLine = true,
                                 shape = RoundedCornerShape(12.dp)
                             )
                         }
+                        WeightInput(
+                            modifier = Modifier.fillMaxWidth(),
+                            label = "Weight (optional)",
+                            amount = weightAmount,
+                            onAmountChange = { weightAmount = it },
+                            unit = weightUnit,
+                            onUnitChange = { weightUnit = it },
+                            amountTestTag = "field_weight"
+                        )
                         // Per-side toggle for strength exercises.
                         Row(
                             modifier = Modifier
@@ -1943,13 +2599,88 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                 }
                             }
                         }
+                        // Optional warmup sets performed before the working sets.
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { warmupEnabled = !warmupEnabled }
+                                .padding(vertical = 4.dp)
+                                .semantics { testTag = "field_warmup_toggle" },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Switch(
+                                checked = warmupEnabled,
+                                onCheckedChange = { warmupEnabled = it },
+                                modifier = Modifier.height(28.dp)
+                            )
+                            Column {
+                                Text(
+                                    "Add warmup sets",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                if (warmupEnabled) {
+                                    Text(
+                                        "Lighter sets before your working sets",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                } else {
+                                    Text(
+                                        "Warm up before your working sets",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                        if (warmupEnabled) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = warmupSets,
+                                    onValueChange = { warmupSets = it.filter(Char::isDigit) },
+                                    label = { Text("Warmup sets") },
+                                    placeholder = { Text("1") },
+                                    modifier = Modifier
+                                        .weight(0.35f)
+                                        .semantics { testTag = "field_warmup_sets" },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                OutlinedTextField(
+                                    value = warmupReps,
+                                    onValueChange = { warmupReps = sanitizeRepsInput(it) },
+                                    label = { Text("Warmup reps") },
+                                    placeholder = { Text(repsOrDuration.ifBlank { "10" }) },
+                                    modifier = Modifier
+                                        .weight(0.65f)
+                                        .semantics { testTag = "field_warmup_reps" },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                            }
+                            WeightInput(
+                                modifier = Modifier.fillMaxWidth(),
+                                label = "Warmup weight (optional)",
+                                amount = warmupWeightAmount,
+                                onAmountChange = { warmupWeightAmount = it },
+                                unit = warmupWeightUnit,
+                                onUnitChange = { warmupWeightUnit = it },
+                                amountTestTag = "field_warmup_weight"
+                            )
+                        }
                         RestDurationInput(
                             modifier = Modifier.fillMaxWidth(),
                             label = "Rest between sets",
                             amount = restBetweenSetsAmount,
                             onAmountChange = { restBetweenSetsAmount = it.filter(Char::isDigit) },
                             unit = restBetweenSetsUnit,
-                            onUnitChange = { restBetweenSetsUnit = it }
+                            onUnitChange = { restBetweenSetsUnit = it },
+                            amountTestTag = "field_strength_rest"
                         )
                     }
                 }
@@ -1964,12 +2695,21 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     onClick = {
                         errorMessage = when (exerciseType) {
                             ExerciseType.STRENGTH -> validateRoutineInput(exerciseName, sets)
+                                ?: validateReps(repsOrDuration)
+                                ?: validateWeight(weightAmount)
+                                ?: when {
+                                    warmupEnabled && (warmupSets.toIntOrNull() == null || warmupSets.toInt() <= 0) ->
+                                        "Warmup sets must be a positive number."
+                                    warmupEnabled -> validateReps(warmupReps)?.let { "Warmup reps: $it" }
+                                        ?: validateWeight(warmupWeightAmount)?.let { "Warmup weight: $it" }
+                                    else -> null
+                                }
                             ExerciseType.TIMED -> when {
                                 exerciseName.isBlank() -> "Exercise name is required."
                                 durationAmount.isBlank() -> "Duration is required."
                                 durationAmount.toIntOrNull() == null || durationAmount.toInt() <= 0 -> "Duration must be a positive number."
                                 sets.isNotBlank() && (sets.toIntOrNull() == null || sets.toInt() <= 0) -> "Sets must be a positive number."
-                                else -> null
+                                else -> validateWeight(weightAmount)
                             }
                             ExerciseType.CARDIO -> when {
                                 exerciseName.isBlank() -> "Exercise name is required."
@@ -1982,6 +2722,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             if (it == null) errorMessage = "Rest must be a valid number."
                         }
                         if (errorMessage == null) {
+                            val isStrength = exerciseType == ExerciseType.STRENGTH
+                            val supportsWeight = exerciseType != ExerciseType.CARDIO
                             val composedDuration = when (exerciseType) {
                                 ExerciseType.TIMED, ExerciseType.CARDIO ->
                                     "$durationAmount ${if (durationUnit == RestUnit.MINUTES) "min" else "sec"}"
@@ -2001,7 +2743,14 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                 isPerSide = when (exerciseType) {
                                     ExerciseType.CARDIO -> false
                                     else -> isPerSide
-                                }
+                                },
+                                weight = if (supportsWeight) formatWeight(weightAmount, weightUnit) else null,
+                                warmupSets = if (isStrength && warmupEnabled)
+                                    (warmupSets.toIntOrNull() ?: 1).coerceAtLeast(1) else 0,
+                                warmupReps = if (isStrength && warmupEnabled)
+                                    warmupReps.trim().ifBlank { null } else null,
+                                warmupWeight = if (isStrength && warmupEnabled)
+                                    formatWeight(warmupWeightAmount, warmupWeightUnit) else null
                             )
                             val idx = editingIndex
                             if (idx != null) routineEntries[idx] = newEntry
@@ -2055,6 +2804,173 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         }
     }
 
+    // ── Cancel exercise confirmation (mid-workout) ────────────────────────────
+    cancelExerciseConfirmIdx?.let { idx ->
+        val name = routineEntries.getOrNull(idx)?.exerciseName ?: "This exercise"
+        AlertDialog(
+            onDismissRequest = { cancelExerciseConfirmIdx = null },
+            icon = {
+                Icon(
+                    Icons.Rounded.Close,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = { Text("Cancel exercise?") },
+            text = { Text("\"$name\" will be removed from this workout.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        cancelExerciseConfirmIdx = null
+                        cancelExercise(idx)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier.semantics { testTag = "btn_confirm_cancel_exercise" }
+                ) { Text("Cancel exercise") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { cancelExerciseConfirmIdx = null }) { Text("Keep") }
+            }
+        )
+    }
+
+    // ── Mid-workout adjust sheet ──────────────────────────────────────────────
+    val adjustIdx = adjustSheetExIdx
+    if (adjustIdx != null && adjustIdx in routineEntries.indices) {
+        val entry = routineEntries[adjustIdx]
+        val isStrengthEntry = entry.type == "STRENGTH"
+        val supportsWeightEntry = entry.type != "CARDIO"
+        val entryUnit = weightUnitOf(entry.weight)
+        val minSets = if (currentWorkStep?.exerciseIndex == adjustIdx) currentWorkStep.setNumber else 1
+        ModalBottomSheet(
+            onDismissRequest = { adjustSheetExIdx = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 32.dp)
+                    .semantics { testTag = "adjust_sheet" },
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(
+                    "Adjust ${entry.exerciseName}",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Changes apply to this set and the ones that follow.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                StepperRow(
+                    label = "Sets",
+                    value = entry.sets.ifBlank { "1" },
+                    decrementEnabled = (entry.sets.toIntOrNull() ?: 1) > minSets,
+                    onDecrement = {
+                        updateCurrentExercise { e ->
+                            val n = (e.sets.toIntOrNull() ?: 1) - 1
+                            e.copy(sets = n.coerceAtLeast(minSets).toString())
+                        }
+                    },
+                    onIncrement = {
+                        updateCurrentExercise { e ->
+                            val n = (e.sets.toIntOrNull() ?: 1) + 1
+                            e.copy(sets = n.coerceAtMost(50).toString())
+                        }
+                    },
+                    testTagPrefix = "adjust_sets"
+                )
+                if (isStrengthEntry) {
+                    StepperRow(
+                        label = "Reps",
+                        value = entry.repsOrDuration.ifBlank { "—" },
+                        onDecrement = {
+                            updateCurrentExercise { e -> e.copy(repsOrDuration = shiftReps(e.repsOrDuration, -1)) }
+                        },
+                        onIncrement = {
+                            updateCurrentExercise { e -> e.copy(repsOrDuration = shiftReps(e.repsOrDuration, 1)) }
+                        },
+                        testTagPrefix = "adjust_reps"
+                    )
+                }
+                if (supportsWeightEntry) {
+                    val step = if (entryUnit == WeightUnit.KG) 2.5 else 5.0
+                    StepperRow(
+                        label = "Weight (${entryUnit.label})",
+                        value = entry.weight ?: "—",
+                        onDecrement = {
+                            updateCurrentExercise { e -> e.copy(weight = shiftWeight(e.weight, -step, entryUnit)) }
+                        },
+                        onIncrement = {
+                            updateCurrentExercise { e -> e.copy(weight = shiftWeight(e.weight, step, entryUnit)) }
+                        },
+                        testTagPrefix = "adjust_weight"
+                    )
+                }
+                if (adjustIdx == upcomingExerciseIndex) {
+                    HorizontalDivider()
+                    Text(
+                        "Reorder",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (canDeferCurrentExercise) {
+                        TextButton(
+                            onClick = {
+                                adjustSheetExIdx = null
+                                doLaterCurrentExercise()
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics { testTag = "btn_do_later" }
+                        ) {
+                            Icon(
+                                Icons.Rounded.KeyboardArrowDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.size(4.dp))
+                            Text("Do this exercise later")
+                        }
+                    }
+                    for (i in (upcomingExerciseIndex + 1) until routineEntries.size) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                routineEntries[i].exerciseName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = { doThisNext(i) },
+                                modifier = Modifier.semantics { testTag = "btn_reorder_next" }
+                            ) {
+                                Text("Do next")
+                            }
+                        }
+                    }
+                }
+                Button(
+                    onClick = { adjustSheetExIdx = null },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { testTag = "adjust_done" },
+                    shape = RoundedCornerShape(12.dp)
+                ) { Text("Done") }
+            }
+        }
+    }
+
     // ── Settings sheet ────────────────────────────────────────────────────────
     if (showSettingsSheet) {
         ModalBottomSheet(
@@ -2091,6 +3007,21 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             soundEnabled = it
                             prefs.edit().putBoolean("pref_sound_enabled", it).apply()
                         }
+                    )
+                }
+
+                SettingRow(
+                    icon = Icons.Rounded.PhoneAndroid,
+                    title = "Play sounds with screen off",
+                    subtitle = "Ticks and tones keep playing in the background during a workout"
+                ) {
+                    Switch(
+                        checked = backgroundAudioEnabled,
+                        onCheckedChange = {
+                            backgroundAudioEnabled = it
+                            prefs.edit().putBoolean("pref_background_audio", it).apply()
+                        },
+                        modifier = Modifier.semantics { testTag = "switch_background_audio" }
                     )
                 }
 
@@ -2405,7 +3336,112 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             )
         }
     }
+
+    // ── Workout history sheet ─────────────────────────────────────────────────
+    if (showHistorySheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showHistorySheet = false },
+            sheetState = historySheetState
+        ) {
+            WorkoutHistorySheet(sessions = workoutHistory.toList())
+        }
+    }
 }
+
+@Composable
+private fun WorkoutHistorySheet(sessions: List<WorkoutSession>) {
+    LazyColumn(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 40.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Workout History",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "${sessions.size} workout${if (sessions.size != 1) "s" else ""}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        if (sessions.isEmpty()) {
+            item {
+                Text(
+                    "No workouts saved yet",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 24.dp)
+                )
+            }
+        } else {
+            items(sessions, key = { it.id ?: it.hashCode().toString() }) { session ->
+                WorkoutHistoryCard(session)
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkoutHistoryCard(session: WorkoutSession) {
+    val dateStr = SimpleDateFormat("MMM d, yyyy · h:mm a", Locale.getDefault())
+        .format(Date(if (session.completedAt > 0L) session.completedAt else System.currentTimeMillis()))
+    val volume = buildList {
+        if (session.volumeLb > 0) add("${formatVolume(session.volumeLb)} lb")
+        if (session.volumeKg > 0) add("${formatVolume(session.volumeKg)} kg")
+    }.joinToString(" + ")
+    OutlinedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        session.routineName?.takeIf { it.isNotBlank() } ?: "Workout",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        dateStr,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Text(
+                buildList {
+                    if (session.durationSeconds > 0) add(formatDuration(session.durationSeconds))
+                    if (session.setsCompleted > 0) add("${session.setsCompleted} set${if (session.setsCompleted != 1) "s" else ""}")
+                    if (session.repsCompleted > 0) add("${session.repsCompleted} reps")
+                    if (volume.isNotBlank()) add(volume)
+                }.joinToString(" · "),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+            if (!session.note.isNullOrBlank()) {
+                Text(
+                    session.note,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { testTag = "history_note" }
+                )
+            }
+        }
+    }
+}
+
 
 // ── Routine Library Sheets ─────────────────────────────────────────────────────
 
@@ -2555,6 +3591,21 @@ private fun LoadRoutineSheet(
     onDelete: (String) -> Unit,
     onEdit: (SavedRoutine) -> Unit
 ) {
+    var selectedFilters by remember { mutableStateOf(emptySet<String>()) }
+
+    fun groupsOf(routine: SavedRoutine): List<String> =
+        routine.muscleGroup?.split(", ")?.filter { it.isNotBlank() } ?: emptyList()
+
+    // Only offer filters for muscle groups actually present in the library,
+    // ordered head-to-toe (then any unknown legacy groups, alphabetically).
+    val availableGroups = remember(routines) {
+        val present = routines.flatMap { groupsOf(it) }.toSet()
+        muscleGroupOptions.filter { it in present } +
+            present.filter { it !in muscleGroupOptions }.sorted()
+    }
+    val filtered = if (selectedFilters.isEmpty()) routines
+        else routines.filter { groupsOf(it).any { g -> g in selectedFilters } }
+
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 40.dp),
@@ -2574,10 +3625,53 @@ private fun LoadRoutineSheet(
                     modifier = Modifier.weight(1f)
                 )
                 Text(
-                    "${routines.size} saved",
+                    if (selectedFilters.isEmpty()) "${routines.size} saved"
+                    else "${filtered.size} of ${routines.size}",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+        if (availableGroups.isNotEmpty()) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Filter by muscle group",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (selectedFilters.isNotEmpty()) {
+                            TextButton(
+                                onClick = { selectedFilters = emptySet() },
+                                modifier = Modifier.semantics { testTag = "btn_clear_filters" }
+                            ) { Text("Clear") }
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        availableGroups.forEach { group ->
+                            FilterChip(
+                                selected = group in selectedFilters,
+                                onClick = {
+                                    selectedFilters = if (group in selectedFilters)
+                                        selectedFilters - group
+                                    else selectedFilters + group
+                                },
+                                label = { Text(group) },
+                                modifier = Modifier.semantics { testTag = "filter_$group" }
+                            )
+                        }
+                    }
+                }
             }
         }
         if (routines.isEmpty()) {
@@ -2589,8 +3683,17 @@ private fun LoadRoutineSheet(
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 24.dp)
                 )
             }
+        } else if (filtered.isEmpty()) {
+            item {
+                Text(
+                    "No saved routines match this filter",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 24.dp)
+                )
+            }
         } else {
-            items(routines, key = { it.id ?: it.hashCode().toString() }) { routine ->
+            items(filtered, key = { it.id ?: it.hashCode().toString() }) { routine ->
                 RoutineLibraryCard(
                     routine = routine,
                     onLoad = { onLoad(routine) },
@@ -2743,7 +3846,13 @@ private fun WorkoutTimelineItem(
     totalSteps: Int,
     timerSeconds: Int,
     isPaused: Boolean,
-    countUp: Boolean = false
+    countUp: Boolean = false,
+    onAdjust: () -> Unit = {},
+    onMarkComplete: () -> Unit = {},
+    onSkip: () -> Unit = {},
+    onCancelExercise: () -> Unit = {},
+    showDoNext: Boolean = false,
+    onDoNext: () -> Unit = {}
 ) {
     val isPast    = stepIndex < currentIndex
     val isCurrent = stepIndex == currentIndex
@@ -2841,21 +3950,59 @@ private fun WorkoutTimelineItem(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        if (step.isWarmup) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.padding(bottom = 2.dp)
+                            ) {
+                                Text(
+                                    "WARMUP",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSecondary,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                                    letterSpacing = TextUnit(1.5f, TextUnitType.Sp)
+                                )
+                            }
+                        }
                         if (step.totalSets > 1) {
                             Text(
-                                "Set ${step.setNumber} of ${step.totalSets}",
+                                if (step.isWarmup) "Warmup ${step.setNumber} of ${step.totalSets}"
+                                else "Set ${step.setNumber} of ${step.totalSets}",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.65f)
                             )
                         }
-                        Text(
-                            step.exerciseName,
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                step.exerciseName,
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .semantics { testTag = "current_exercise_name" }
+                            )
+                            IconButton(
+                                onClick = onAdjust,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .semantics { testTag = "btn_adjust" }
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Settings,
+                                    contentDescription = "Set settings",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
                         // Side badge
                         if (step.side.isNotBlank()) {
                             val sideColor = if (step.side == "Left")
@@ -2911,17 +4058,60 @@ private fun WorkoutTimelineItem(
                         } else {
                             if (step.repsOrDurationLabel.isNotBlank()) {
                                 Text(
-                                    step.repsOrDurationLabel,
+                                    formatRepsLabel(step.repsOrDurationLabel),
                                     style = MaterialTheme.typography.displaySmall,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer
                                 )
                             }
+                        }
+                        if (step.weight.isNotBlank()) {
+                            Spacer(Modifier.height(6.dp))
                             Text(
-                                "Tap Done when finished",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
+                                "WEIGHT",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f),
+                                letterSpacing = TextUnit(1.5f, TextUnitType.Sp)
                             )
+                            Text(
+                                step.weight,
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                        // Card-level actions for the active step.
+                        Spacer(Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            TextButton(
+                                onClick = onMarkComplete,
+                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                modifier = Modifier.semantics { testTag = "btn_done" }
+                            ) {
+                                Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(4.dp))
+                                Text("Mark Complete")
+                            }
+                            TextButton(
+                                onClick = onSkip,
+                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                modifier = Modifier.semantics { testTag = "btn_skip" }
+                            ) {
+                                Text("Skip")
+                            }
+                            TextButton(
+                                onClick = onCancelExercise,
+                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                colors = ButtonDefaults.textButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error
+                                ),
+                                modifier = Modifier.semantics { testTag = "btn_cancel_exercise" }
+                            ) {
+                                Text("Cancel")
+                            }
                         }
                     }
                 }
@@ -2971,6 +4161,14 @@ private fun WorkoutTimelineItem(
                                 color = MaterialTheme.colorScheme.onTertiaryContainer
                             )
                         }
+                        Spacer(Modifier.height(6.dp))
+                        TextButton(
+                            onClick = onSkip,
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier.semantics { testTag = "btn_skip" }
+                        ) {
+                            Text("Skip Rest")
+                        }
                     }
                 }
             }
@@ -2978,10 +4176,12 @@ private fun WorkoutTimelineItem(
             // Compact past / future row
             val label = when (step) {
                 is WorkoutStep.Work -> buildString {
+                    if (step.isWarmup) append("Warmup · ")
                     append(step.exerciseName)
                     if (step.totalSets > 1) append(" · Set ${step.setNumber}/${step.totalSets}")
                     if (step.side.isNotBlank()) append(" · ${step.side}")
-                    if (step.repsOrDurationLabel.isNotBlank()) append(" · ${step.repsOrDurationLabel}")
+                    if (step.repsOrDurationLabel.isNotBlank()) append(" · ${formatRepsLabel(step.repsOrDurationLabel)}")
+                    if (step.weight.isNotBlank()) append(" · ${step.weight}")
                 }
                 is WorkoutStep.Rest -> buildString {
                     append("Rest · ${formatDuration(step.durationSeconds)}")
@@ -2998,6 +4198,17 @@ private fun WorkoutTimelineItem(
                     .weight(1f)
                     .padding(start = 10.dp, top = 10.dp, bottom = 10.dp, end = 4.dp)
             )
+            if (showDoNext && !isPast && !isCurrent) {
+                TextButton(
+                    onClick = onDoNext,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                    modifier = Modifier
+                        .align(Alignment.CenterVertically)
+                        .semantics { testTag = "btn_do_next" }
+                ) {
+                    Text("Do next", style = MaterialTheme.typography.labelMedium)
+                }
+            }
         }
     }
 }
@@ -3115,6 +4326,144 @@ private fun RestDurationInput(
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WeightInput(
+    modifier: Modifier = Modifier,
+    label: String,
+    amount: String,
+    onAmountChange: (String) -> Unit,
+    unit: WeightUnit,
+    onUnitChange: (WeightUnit) -> Unit,
+    amountTestTag: String = ""
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedTextField(
+                value = amount,
+                onValueChange = { onAmountChange(sanitizeWeightInput(it)) },
+                placeholder = { Text("0") },
+                modifier = Modifier.weight(0.35f).then(
+                    if (amountTestTag.isNotEmpty()) Modifier.semantics { testTag = amountTestTag } else Modifier
+                ),
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                shape = RoundedCornerShape(12.dp)
+            )
+            ExposedDropdownMenuBox(
+                expanded = expanded,
+                onExpandedChange = { expanded = !expanded },
+                modifier = Modifier.weight(0.65f)
+            ) {
+                OutlinedTextField(
+                    value = unit.label,
+                    onValueChange = {},
+                    readOnly = true,
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                    modifier = Modifier
+                        .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true)
+                        .fillMaxWidth(),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp)
+                )
+                ExposedDropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false }
+                ) {
+                    WeightUnit.entries.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label) },
+                            onClick = {
+                                onUnitChange(option)
+                                expanded = false
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StepperRow(
+    label: String,
+    value: String,
+    onDecrement: () -> Unit,
+    onIncrement: () -> Unit,
+    decrementEnabled: Boolean = true,
+    incrementEnabled: Boolean = true,
+    testTagPrefix: String = ""
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f)
+        )
+        OutlinedIconButton(
+            onClick = onDecrement,
+            enabled = decrementEnabled,
+            modifier = if (testTagPrefix.isNotEmpty())
+                Modifier.semantics { testTag = "${testTagPrefix}_dec" } else Modifier
+        ) {
+            Icon(Icons.Rounded.Remove, contentDescription = "Decrease $label")
+        }
+        Text(
+            value,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.widthIn(min = 64.dp)
+        )
+        OutlinedIconButton(
+            onClick = onIncrement,
+            enabled = incrementEnabled,
+            modifier = if (testTagPrefix.isNotEmpty())
+                Modifier.semantics { testTag = "${testTagPrefix}_inc" } else Modifier
+        ) {
+            Icon(Icons.Rounded.Add, contentDescription = "Increase $label")
+        }
+    }
+}
+
+@Composable
+private fun StatCard(label: String, value: String, modifier: Modifier = Modifier) {
+    OutlinedCard(modifier = modifier, shape = RoundedCornerShape(14.dp)) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                label.uppercase(),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                value,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }

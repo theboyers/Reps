@@ -20,8 +20,8 @@ android {
         applicationId = "net.theboyers.reps"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -35,6 +35,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            ndk {
+                // Generate a native-debug-symbols.zip alongside the AAB so it can be
+                // uploaded to Play Console to make crashes/ANRs from bundled .so files
+                // (e.g. Compose's Skia) easier to analyse. SYMBOL_TABLE is smaller than
+                // FULL and is sufficient for stack-trace symbolication.
+                debugSymbolLevel = "SYMBOL_TABLE"
+            }
         }
     }
     compileOptions {

@@ -2,6 +2,55 @@
 
 ---
 
+## v1.3.0 — October 17, 2026
+
+### Strength Training
+
+**Weight**
+- Strength and Timed exercises now accept an optional weight, entered in pounds or kilograms
+- The weight is shown on each weighted step while the workout runs, and summarised in the routine builder, grace-period list, and completion screen
+- A blank or zero weight is treated as none and is not displayed during the workout
+
+**Warmup sets**
+- Add one or more warmup sets to any strength exercise
+- Each warmup can have its own reps and weight; leave them blank to reuse the working set's values
+- Warmup steps run first and are clearly labelled **WARMUP** in the workout timeline
+
+### Audio cues in the background
+
+- A short tick now sounds for each of the final five seconds of a rest
+- A distinct tone plays when a rest ends and the next step begins
+- These cues keep firing with the screen off or while you're in another app, kept on time by a lightweight foreground service
+- Battery stays low: the CPU is held awake only while cues are pending, and released while waiting on rep-based steps
+- New setting **Play sounds with screen off** (on by default) turns the background service off for a foreground-only experience
+
+### Mid-workout control
+
+- The active card now carries **Mark Complete**, **Skip**, and **Cancel** actions, plus a **gear** for the exercise's set settings (sets, reps, weight) — and, when possible, "machine busy — do later"
+- **Cancel** removes the exercise from the workout entirely; a confirmation dialog prevents accidental removals
+- Tap **Do next** on any upcoming exercise to move it up
+- Adjustments update the current routine; they reach your saved library only if you press Save afterward
+
+### Summary & history
+
+- The finish screen shows **duration**, **sets done**, **reps done**, and **total weight lifted** (kept per unit for lb and kg)
+- Add a **note** about the workout and **save it to a history** you can browse from the top bar, notes included
+- History is stored locally with the routine library; nothing is sent anywhere
+
+### UX
+- Rest between sets now defaults to **90 seconds** when adding a new exercise
+- The Reps field accepts only a number or a range (e.g. `10` or `10-14`)
+- Rep-based steps now label the count (e.g. **12 reps**) instead of showing a bare number
+- The exercise form now scrolls, so it stays reachable as the form grows on smaller screens
+- Muscle-group options are ordered head-to-toe and expanded (traps, lats, obliques, lower back, glutes, hip flexors, adductors/abductors, quads, hamstrings, calves, and more)
+- The routine library can be **filtered by muscle group**; the Save and Library icons are now distinct
+
+### Testing
+- Added unit tests for weight validation/formatting and warmup step expansion
+- Added instrumented UI tests covering weight entry (lb/kg), warmup entry, validation, editing, and display during a workout
+
+---
+
 ## v1.2.0 — May 20, 2026
 
 ### Timer Improvements

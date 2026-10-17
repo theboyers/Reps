@@ -3,6 +3,7 @@
 # Keep data classes used by Gson for serialization/deserialization.
 -keep class net.theboyers.reps.RoutineEntry { *; }
 -keep class net.theboyers.reps.SavedRoutine { *; }
+-keep class net.theboyers.reps.WorkoutSession { *; }
 -keepattributes Signature
 -keepattributes *Annotation*
 

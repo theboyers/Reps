@@ -179,6 +179,22 @@ class RoutineLibraryTest {
         composeTestRule.onNodeWithText("2 saved").assertIsDisplayed()
     }
 
+    // ── Library filtering ─────────────────────────────────────────────────────
+
+    @Test
+    fun libraryFilter_showsOnlyMatchingRoutines() {
+        addStrengthExercise("Bench")
+        saveRoutineWithGroup("Push Day", "Chest")
+        addStrengthExercise("Squats")
+        saveRoutineWithGroup("Leg Day", "Quads")
+
+        openLoadSheet()
+        composeTestRule.onNodeWithTag("filter_Chest").performScrollTo().performClick()
+
+        composeTestRule.onNodeWithText("Push Day").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Leg Day").assertDoesNotExist()
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private fun openAddExerciseSheet() {
@@ -217,6 +233,21 @@ class RoutineLibraryTest {
             .performTextInput(name)
         composeTestRule.onNodeWithText("Save").performClick()
         // Drain the save-sheet closing animation before the next action.
+        composeTestRule.waitForIdle()
+    }
+
+    private fun saveRoutineWithGroup(name: String, group: String) {
+        openSaveSheet()
+        composeTestRule.onNode(hasText("Routine name").and(hasSetTextAction()))
+            .performTextInput(name)
+        // Open the muscle-groups dialog via the read-only field.
+        composeTestRule.onNodeWithText("Full Body").performClick()
+        composeTestRule.waitUntil(3_000) {
+            composeTestRule.onAllNodesWithText("Muscle Groups").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithText(group).performClick()
+        composeTestRule.onNodeWithText("Done").performClick()
+        composeTestRule.onNodeWithText("Save").performClick()
         composeTestRule.waitForIdle()
     }
 }

@@ -245,6 +245,7 @@ class WorkoutFlowTest {
             composeTestRule.onAllNodesWithTag("screen_complete").fetchSemanticsNodes().isNotEmpty()
         }
         composeTestRule.onNodeWithText("Mountain Climbers")
+            .performScrollTo()
             .assertIsDisplayed()
     }
 
@@ -258,7 +259,7 @@ class WorkoutFlowTest {
         composeTestRule.waitUntil(4_000) {
             composeTestRule.onAllNodesWithTag("screen_complete").fetchSemanticsNodes().isNotEmpty()
         }
-        composeTestRule.onNodeWithTag("btn_back_to_routine").performClick()
+        composeTestRule.onNodeWithTag("btn_back_to_routine").performScrollTo().performClick()
 
         composeTestRule.onNodeWithTag("screen_editing").assertIsDisplayed()
     }
@@ -287,11 +288,10 @@ class WorkoutFlowTest {
         composeTestRule.onNodeWithTag("field_exercise_name").performTextInput(name)
         composeTestRule.onNode(hasText("Sets").and(hasSetTextAction()))
             .performTextInput(sets)
-        // Rest field has placeholder "0"
-        composeTestRule.onAllNodes(hasText("0").and(hasSetTextAction()))
-            .onFirst()
-            .performTextInput(restSecs)
-        composeTestRule.onNodeWithTag("btn_submit_exercise").performClick()
+        // The rest field defaults to 90s, so clear it before entering the test value.
+        composeTestRule.onNodeWithTag("field_strength_rest").performScrollTo().performTextClearance()
+        composeTestRule.onNodeWithTag("field_strength_rest").performTextInput(restSecs)
+        composeTestRule.onNodeWithTag("btn_submit_exercise").performScrollTo().performClick()
     }
 
     /**

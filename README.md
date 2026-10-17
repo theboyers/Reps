@@ -10,13 +10,17 @@ No streaks. No badges. No social feed. No "great job!" No suggested workouts. No
 
 **Build a routine**
 - Add exercises as Strength (sets × reps), Timed (sets × duration), or Cardio (single duration)
-- Set rest time per set and global rest between exercises
+- Strength and Timed exercises can specify an optional weight (lb or kg)
+- Strength exercises can add warmup sets before the working sets
+- Reps take a number or a range (e.g. 10 or 10-14)
+- Rest between sets defaults to 90 seconds; set it per exercise, plus a global rest between exercises
 - Long-press any exercise card to drag it into the order you want
 - Edit or delete exercises from the card's overflow menu
 
 **Save and restore**
 - Save a routine to your local library with a name, intensity label, and muscle group tags
 - Load any saved routine back onto the builder in one tap
+- Filter the routine library by muscle group
 - Edit a saved routine in-place — changes are written back when you save
 - Export your entire library to a JSON file; import it back on any device
 
@@ -26,26 +30,31 @@ No streaks. No badges. No social feed. No "great job!" No suggested workouts. No
 - Timed steps and rest periods count down automatically and advance on their own
 - Rep-based steps wait for you to tap Done
 - Per-side exercises (Left / Right) are tracked as separate steps in the sequence
+- Warmup sets run first and are marked as WARMUP; the weight to use is shown on each strength step
 - Pause at any point; a sound cue fires when any timer hits zero
-- **Designed to stay in the foreground** — timers remain accurate through brief interruptions (e.g. silencing a notification), but Reps has no background service and will not reliably sound cues or auto-advance steps while you are actively using another app
+- **Sound cues in the background** — a tick sounds for the final five seconds of each rest and a distinct tone plays when the next step begins, kept on time even with the screen off by a lightweight foreground service (the CPU is only held awake while cues are pending). Turn this off any time in Settings to fall back to foreground-only sound
+- **Adjust on the fly** — tap the gear on the active exercise to change its sets, reps, or weight for the rest of that exercise, without stopping the workout
+- **Mark Complete / Skip / Cancel on the card** — mark the current set done, skip the current step, or cancel the exercise (with a confirmation) right where you're working
+- **Machine busy?** — defer the current exercise to the end of the workout (from the gear sheet), or tap **Do next** on any upcoming exercise to move it up
+- **Finish and review** — the summary shows duration, sets done, reps done, and total weight lifted; add a note and save the workout to a browseable history
 
 ---
 
 ## What it does not do
 
-- Track your weight, body measurements, or progress over time
+- Track body weight, measurements, or progress over time
 - Tell you how to perform an exercise
 - Judge whether your routine is good or bad
 - Require an account or any internet access
-- Send notifications, collect analytics, or phone home
-- Run reliably in the background — Reps is designed to stay on screen during your workout; brief interruptions are fine, but switching away for an extended period may cause timers and sound cues to miss
+- Collect analytics or phone home
+- Send notifications beyond the single ongoing "workout in progress" one shown while background sound is enabled
 
 ---
 
 ## Requirements
 
 - Android 8.0 (API 26) or higher
-- No permissions required
+- No special permissions needed. With background sound enabled, Reps uses a foreground service (and, if you allow notifications, a single ongoing "workout in progress" notification) so sound cues keep playing with the screen off
 
 ---
 
@@ -125,9 +134,11 @@ You build your routine. Reps runs it.
 ── BUILDING A ROUTINE ──
 
 Add exercises as one of three types:
-  • Strength — sets × reps (e.g. 4 sets of 8 squats)
-  • Timed — sets × duration (e.g. 3 sets of 30-second planks)
+  • Strength — sets × reps (e.g. 4 sets of 8 squats), with an optional weight in lb or kg
+  • Timed — sets × duration (e.g. 3 sets of 30-second planks), with an optional weight
   • Cardio — a single duration (e.g. 20-minute run)
+
+Reps take a number or a range (e.g. 10 or 10-14), and rest between sets defaults to 90 seconds. Strength exercises can also include warmup sets performed before the working sets, each with their own optional reps and weight.
 
 Set a rest period between sets for each exercise, and a global rest between exercises. Long-press any exercise card to drag it into the order you want. Edit or delete exercises from the card's overflow menu at any time.
 
@@ -140,10 +151,16 @@ A scrolling timeline shows every set and rest period in sequence — past, curre
   • Timed sets and all rest periods count down automatically and advance on their own.
   • Rep-based sets wait for you to tap Done when you're finished.
   • Per-side exercises (Left / Right) are tracked as separate steps.
+  • Warmup sets appear first, labelled WARMUP, and each weighted step shows the weight to use.
+  • Adjust sets, reps, or weight mid-workout from the gear on the active exercise, without stopping.
+  • Mark Complete, Skip, or Cancel an exercise (with a confirmation) right on the card.
+  • Machine busy? Defer the exercise to the end, or move an upcoming exercise up with "Do next".
+  • The finish screen summarises duration, sets, reps, and total weight lifted, and lets you add a note and save the workout to a history you can browse later.
   • A sound cue fires when any timer reaches zero.
+  • A tick sounds for the final five seconds of each rest, and a distinct tone plays when the next step begins.
   • Pause at any point and pick up exactly where you left off.
 
-Reps is designed to stay in the foreground while you work out. Timers stay accurate through brief interruptions (silencing a notification, checking a message), but Reps runs no background service — if you switch to another app for an extended period, sound cues and auto-advance may not fire on time.
+Sound cues keep playing even with the screen off — a lightweight foreground service keeps the countdown accurate and is only awake while cues are pending. You can switch this off in Settings.
 
 ── SAVING AND RESTORING ──
 
@@ -157,8 +174,9 @@ Export your entire library to a JSON file and import it back on any device.
   • No ads, no analytics, no crash reporting, no data collection of any kind.
   • No progress tracking, no body measurements, no streaks, no badges.
   • No suggested workouts. No form tips. No "great job!"
-  • Does not require any Android permissions.
-  • Does not run in the background. Reps is built to stay on screen during your workout. Timers stay accurate through brief interruptions, but switching to another app for an extended period may cause sound cues and auto-advance to miss. Use the Pause button if you need to step away.
+  • No ads, no analytics, no crash reporting, no data collection of any kind.
+  • No internet access and no account required.
+  • Background sound is optional. While it is on and a workout is running, Android shows one ongoing notification for the audio service; no data is collected and nothing is sent anywhere. Switch it off in Settings to keep everything on screen.
 
 If you want a fitness social network, a coaching app, or a progress journal, Reps is the wrong app. If you want something that runs your workout and stays out of the way, this is it.
 

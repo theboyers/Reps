@@ -9,11 +9,12 @@ No streaks. No badges. No social feed. No "great job!" No suggested workouts. No
 ## What it does
 
 **Build a routine**
-- Add exercises as Strength (sets × reps), Timed (sets × duration), or Cardio (single duration)
+- Add exercises as Strength (sets x reps), Timed (sets x duration), or Cardio (single duration)
 - Strength and Timed exercises can specify an optional weight (lb or kg)
 - Strength exercises can add warmup sets before the working sets
 - Reps take a number or a range (e.g. 10 or 10-14)
 - Rest between sets defaults to 90 seconds; set it per exercise, plus a global rest between exercises
+- Adding an exercise prefills sets, reps, weight, and rest from the **last time you used that exercise**
 - Long-press any exercise card to drag it into the order you want
 - Edit or delete exercises from the card's overflow menu
 
@@ -21,22 +22,31 @@ No streaks. No badges. No social feed. No "great job!" No suggested workouts. No
 - Save a routine to your local library with a name, intensity label, and muscle group tags
 - Load any saved routine back onto the builder in one tap
 - Filter the routine library by muscle group
-- Edit a saved routine in-place — changes are written back when you save
+- Edit a saved routine in-place - changes are written back when you save
 - Export your entire library to a JSON file; import it back on any device
 
 **Run the workout**
-- A configurable grace-period countdown gives you time to get into position before the first step
-- A scrolling timeline shows every set and rest period in sequence — past, current, and upcoming
-- Timed steps and rest periods count down automatically and advance on their own
-- Rep-based steps wait for you to tap Done
-- Per-side exercises (Left / Right) are tracked as separate steps in the sequence
-- Warmup sets run first and are marked as WARMUP; the weight to use is shown on each strength step
+- A grace-period countdown appears only when the first step is timed (Timed or Cardio); a rep-based first set starts immediately
+- Your routine stays on screen and runs in place - each exercise is marked done as you finish it
+- The active exercise shows the current set large — reps (or time) and weight side by side — plus **Mark Complete**, **Skip**, and **Cancel** (with confirmation), and a gear for set settings
+- **Skip** defers the rest of that exercise's sets to the end of the routine, so you can free up a machine and come back to it; **Cancel** removes it entirely
+- Rest periods count down inline on the card and advance on their own; while resting you can pause, drag to re-order, or remove an exercise
+- Nudge any rest or timed/cardio step by +10 / -10 seconds right from the card
+- During a rest, if the next set uses a different weight, the card prompts you to change it (e.g. "Set to 60 lb")
+- Timed steps count down and advance on their own; rep-based steps wait for Mark Complete
+- Per-side exercises (Left / Right) are tracked as separate sets
+- Warmup sets run first and are marked WARMUP; the weight to use is shown on the active card
 - Pause at any point; a sound cue fires when any timer hits zero
-- **Sound cues in the background** — a tick sounds for the final five seconds of each rest and a distinct tone plays when the next step begins, kept on time even with the screen off by a lightweight foreground service (the CPU is only held awake while cues are pending). Turn this off any time in Settings to fall back to foreground-only sound
-- **Adjust on the fly** — tap the gear on the active exercise to change its sets, reps, or weight for the rest of that exercise, without stopping the workout
+- **Sound cues in the background** — a tick sounds for the final five seconds of each rest and a distinct tone plays when the next step begins, kept on time even with the screen off by a lightweight foreground service that only runs while a timer is active and the app is off screen — the CPU is held awake only while cues are pending, and the service stops itself as soon as a timer's cues finish. Turn this off any time in Settings to fall back to foreground-only sound
+- **Adjust on the fly** - tap the gear on the active exercise to change its sets, reps, or weight for the rest of that exercise, without stopping the workout
+- **Per-set reps & weight** - give individual sets their own reps and weight for pyramids and drop sets (Strength exercises)
+- **Effort tags** - mark sets **AMRAP**, **RPE 6–10**, or **To failure**, either exercise-wide or per set; the active set shows its tag while you train
+- **Undo** - Cancel, Remove, and Skip offer a one-tap **Undo** in a snackbar
 - **Mark Complete / Skip / Cancel on the card** — mark the current set done, skip the current step, or cancel the exercise (with a confirmation) right where you're working
-- **Machine busy?** — defer the current exercise to the end of the workout (from the gear sheet), or tap **Do next** on any upcoming exercise to move it up
-- **Finish and review** — the summary shows duration, sets done, reps done, and total weight lifted; add a note and save the workout to a browseable history
+- **Machine busy?** - each upcoming exercise has an options menu (gear) with **Do next**, **Move to end**, and **Remove**; you can also drag to re-order
+- **Finish and review** - the summary shows duration, sets done, reps done, and total weight lifted; add a note and save the workout to a browseable history
+- **History controls** - browse, delete individual workouts, clear all, or export your history to JSON
+- **Durable** - your working routine and any in-progress workout are saved, so you can resume after the app is closed or killed
 
 ---
 
@@ -144,17 +154,17 @@ Set a rest period between sets for each exercise, and a global rest between exer
 
 ── RUNNING A WORKOUT ──
 
-Tap Start. A configurable grace-period countdown gives you time to get into position before the first step begins.
+Tap Start. If the first step is Timed or Cardio, a grace-period countdown gives you time to get into position; a rep-based first set starts immediately.
 
-A scrolling timeline shows every set and rest period in sequence — past, current, and upcoming — so you always know where you are and what's next.
+Your routine stays on screen and runs in place — each exercise is marked done as you finish it — so you always know where you are and what's next.
 
   • Timed sets and all rest periods count down automatically and advance on their own.
-  • Rep-based sets wait for you to tap Done when you're finished.
+  • Rep-based sets wait for you to tap Mark Complete when you're finished.
   • Per-side exercises (Left / Right) are tracked as separate steps.
   • Warmup sets appear first, labelled WARMUP, and each weighted step shows the weight to use.
   • Adjust sets, reps, or weight mid-workout from the gear on the active exercise, without stopping.
   • Mark Complete, Skip, or Cancel an exercise (with a confirmation) right on the card.
-  • Machine busy? Defer the exercise to the end, or move an upcoming exercise up with "Do next".
+- **Machine busy?** - each upcoming exercise has an options menu (gear) with **Do next**, **Move to end**, and **Remove**; you can also drag to re-order
   • The finish screen summarises duration, sets, reps, and total weight lifted, and lets you add a note and save the workout to a history you can browse later.
   • A sound cue fires when any timer reaches zero.
   • A tick sounds for the final five seconds of each rest, and a distinct tone plays when the next step begins.

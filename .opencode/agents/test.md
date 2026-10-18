@@ -1,7 +1,7 @@
 ---
 description: Testing and QA specialist. Executes test suites, analyzes test failures, and writes comprehensive unit and integration tests.
 mode: all
-model: deepseek/deepseek-v4.1-flash
+model: opencode-go/deepseek-v4.1-flash
 steps: 25
 permissions:
   - action: edit

@@ -62,7 +62,44 @@ class WorkoutSummaryTest {
             .assertTextEquals("Machine was busy, good session")
     }
 
+    @Test
+    fun historyEntry_canBeDeleted() {
+        saveWorkoutWithNote("Rest day notes")
+        openHistory()
+
+        composeTestRule.onNodeWithTag("btn_delete_history_entry").performClick()
+        composeTestRule.onNodeWithText("Delete").performClick()
+
+        composeTestRule.onNodeWithText("No workouts saved yet").assertIsDisplayed()
+    }
+
+    @Test
+    fun history_canBeCleared() {
+        saveWorkoutWithNote("Rest day notes")
+        openHistory()
+
+        composeTestRule.onNodeWithTag("btn_clear_history").performClick()
+        composeTestRule.onNodeWithTag("btn_confirm_clear_history").performClick()
+
+        composeTestRule.onNodeWithText("No workouts saved yet").assertIsDisplayed()
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
+
+    private fun saveWorkoutWithNote(note: String) {
+        completeWorkout(weight = "135", reps = "10")
+        composeTestRule.onNodeWithTag("field_workout_note").performScrollTo().performTextInput(note)
+        composeTestRule.onNodeWithTag("btn_save_history").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("btn_back_to_routine").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+    }
+
+    private fun openHistory() {
+        composeTestRule.onNodeWithContentDescription("Workout history").performClick()
+        composeTestRule.waitUntil(3_000) {
+            composeTestRule.onAllNodesWithText("Workout History").fetchSemanticsNodes().isNotEmpty()
+        }
+    }
 
     private fun openAddExerciseSheet() {
         composeTestRule.onNodeWithTag("fab_add_exercise").performClick()

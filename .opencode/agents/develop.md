@@ -1,7 +1,7 @@
 ---
 description: Primary development agent for implementing features, refactoring, and fixing bugs in Kotlin and Jetpack Compose.
 mode: primary
-model: deepseek/deepseek-v4.1-flash
+model: opencode-go/deepseek-v4.1-flash
 steps: 30
 permissions:
   - action: edit

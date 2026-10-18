@@ -22,10 +22,23 @@ class WorkoutStepBuilderTest {
         weight: String? = null,
         warmupSets: Int = 0,
         warmupReps: String? = null,
-        warmupWeight: String? = null
+        warmupWeight: String? = null,
+        perSet: List<RoutineSet>? = null,
+        repTag: String? = null
     ) = RoutineEntry(
-        name, "", sets.toString(), reps, restSecs, "STRENGTH", isPerSide,
-        weight, warmupSets, warmupReps, warmupWeight
+        exerciseName = name,
+        details = "",
+        sets = sets.toString(),
+        repsOrDuration = reps,
+        restBetweenSetsSeconds = restSecs,
+        type = "STRENGTH",
+        isPerSide = isPerSide,
+        weight = weight,
+        warmupSets = warmupSets,
+        warmupReps = warmupReps,
+        warmupWeight = warmupWeight,
+        perSet = perSet,
+        repTag = repTag
     )
 
     private fun timed(
@@ -334,6 +347,73 @@ class WorkoutStepBuilderTest {
     @Test fun noWarmup_whenCountIsZero() {
         val steps = buildWorkoutSteps(listOf(strength("Squats", sets = 2)), 0)
         assertFalse(steps.workSteps.any { it.isWarmup })
+    }
+
+    // ── per-set reps & weight (pyramids, drop sets) ───────────────────────────
+
+    @Test fun perSet_overridesRepsAndWeight() {
+        val steps = buildWorkoutSteps(
+            listOf(
+                strength(
+                    "Squats", sets = 3, reps = "10", weight = "100 lb",
+                    perSet = listOf(
+                        RoutineSet(reps = "12", weight = "60 lb"),
+                        RoutineSet(reps = "10", weight = "80 lb"),
+                        RoutineSet(reps = "8", weight = "100 lb")
+                    )
+                )
+            ),
+            0
+        )
+        assertEquals(listOf("12", "10", "8"), steps.workSteps.map { it.repsOrDurationLabel })
+        assertEquals(listOf("60 lb", "80 lb", "100 lb"), steps.workSteps.map { it.weight })
+    }
+
+    @Test fun perSet_blankFieldsFallBackToExercise() {
+        val steps = buildWorkoutSteps(
+            listOf(
+                strength(
+                    "Squats", sets = 2, reps = "10", weight = "100 lb",
+                    perSet = listOf(RoutineSet(reps = "12"), RoutineSet())
+                )
+            ),
+            0
+        )
+        assertEquals(listOf("12", "10"), steps.workSteps.map { it.repsOrDurationLabel })
+        assertEquals(listOf("100 lb", "100 lb"), steps.workSteps.map { it.weight })
+    }
+
+    @Test fun perSet_perSideAppliesPerRound() {
+        val steps = buildWorkoutSteps(
+            listOf(
+                strength(
+                    "Lunges", sets = 2, isPerSide = true,
+                    perSet = listOf(RoutineSet(weight = "30 lb"), RoutineSet(weight = "40 lb"))
+                )
+            ),
+            0
+        )
+        assertEquals(listOf("30 lb", "30 lb", "40 lb", "40 lb"), steps.workSteps.map { it.weight })
+    }
+
+    // ── effort tags ───────────────────────────────────────────────────────────
+
+    @Test fun repTag_appliesToEveryWorkingSet() {
+        val steps = buildWorkoutSteps(listOf(strength("Squats", sets = 2, repTag = "To failure")), 0)
+        steps.workSteps.forEach { assertEquals("To failure", it.tag) }
+    }
+
+    @Test fun perSet_tagOverridesAndFallsBack() {
+        val steps = buildWorkoutSteps(
+            listOf(strength("Squats", sets = 2, repTag = "RPE 8", perSet = listOf(RoutineSet(tag = "AMRAP")))),
+            0
+        )
+        assertEquals(listOf("AMRAP", "RPE 8"), steps.workSteps.map { it.tag })
+    }
+
+    @Test fun noTag_tagsAreBlank() {
+        val steps = buildWorkoutSteps(listOf(strength("Squats", sets = 2)), 0)
+        steps.workSteps.forEach { assertEquals("", it.tag) }
     }
 }
 

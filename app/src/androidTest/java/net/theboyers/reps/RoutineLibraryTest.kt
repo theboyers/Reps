@@ -148,8 +148,9 @@ class RoutineLibraryTest {
         saveRoutine("Leg Day")
 
         openLoadSheet()
-        composeTestRule.onNodeWithContentDescription("Delete routine").performClick()
-        composeTestRule.onNodeWithText("Delete").performClick()
+        composeTestRule.onNodeWithTag("btn_routine_options").performClick()
+        composeTestRule.onNodeWithTag("btn_delete_routine").performClick()
+        composeTestRule.onNodeWithTag("btn_confirm_delete_routine").performClick()
 
         composeTestRule.onNodeWithText("No saved routines yet").assertIsDisplayed()
     }
@@ -160,10 +161,24 @@ class RoutineLibraryTest {
         saveRoutine("Leg Day")
 
         openLoadSheet()
-        composeTestRule.onNodeWithContentDescription("Delete routine").performClick()
+        composeTestRule.onNodeWithTag("btn_routine_options").performClick()
+        composeTestRule.onNodeWithTag("btn_delete_routine").performClick()
         composeTestRule.onNodeWithText("Cancel").performClick()
 
         composeTestRule.onNodeWithText("Leg Day").assertIsDisplayed()
+    }
+
+    @Test
+    fun duplicateRoutine_addsACopyToTheLibrary() {
+        addStrengthExercise("Squats")
+        saveRoutine("Leg Day")
+
+        openLoadSheet()
+        composeTestRule.onNodeWithTag("btn_routine_options").performClick()
+        composeTestRule.onNodeWithTag("btn_duplicate_routine").performClick()
+
+        composeTestRule.onNodeWithText("Leg Day (copy)").assertIsDisplayed()
+        composeTestRule.onNodeWithText("2 saved").assertIsDisplayed()
     }
 
     // ── Library count ─────────────────────────────────────────────────────────

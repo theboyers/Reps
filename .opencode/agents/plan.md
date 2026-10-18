@@ -1,7 +1,7 @@
 ---
 description: Software architect and planning agent. Analyzes requirements, maps dependencies, and designs phased roadmaps without editing code.
 mode: primary
-model: deepseek/deepseek-v4.1-flash
+model: opencode-go/deepseek-v4.1-flash
 steps: 20
 permissions:
   - action: edit

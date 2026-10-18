@@ -48,7 +48,7 @@ class MidWorkoutTest {
         composeTestRule.onNodeWithTag("adjust_reps_inc").performClick()
         composeTestRule.onNodeWithTag("adjust_done").performClick()
 
-        composeTestRule.onNodeWithText("11 reps").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("set_value").assertTextEquals("11")
     }
 
     @Test
@@ -72,7 +72,7 @@ class MidWorkoutTest {
         composeTestRule.onNodeWithTag("adjust_weight_inc").performClick()
         composeTestRule.onNodeWithTag("adjust_done").performClick()
 
-        composeTestRule.onNodeWithText("140 lb").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("weight_value").assertTextEquals("140")
     }
 
     // ── reorder ───────────────────────────────────────────────────────────────
@@ -99,12 +99,50 @@ class MidWorkoutTest {
         addStrength("Deadlifts", sets = "1")
         startWorkoutAndWaitForRunning()
 
-        // The last "Do next" belongs to Deadlifts (the final upcoming exercise).
-        composeTestRule.onAllNodesWithTag("btn_do_next").onLast().performScrollTo().performClick()
+        // Open the options menu on the last upcoming exercise (Deadlifts).
+        composeTestRule.onAllNodesWithTag("btn_exercise_options").onLast().performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("btn_do_next").performClick()
 
         // Finish the current exercise; Deadlifts should be next.
-        composeTestRule.onNodeWithTag("btn_done").performClick()
+        composeTestRule.onNodeWithTag("btn_done").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("current_exercise_name").assertTextEquals("Deadlifts")
+    }
+
+    @Test
+    fun futureExercise_canBeRemovedFromItsOptionsMenu() {
+        addStrength("Squats", sets = "1")
+        addStrength("Lunges", sets = "1")
+        startWorkoutAndWaitForRunning()
+
+        composeTestRule.onAllNodesWithTag("btn_exercise_options").onFirst().performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("btn_remove_exercise").performClick()
+        composeTestRule.onNodeWithText("Remove exercise?").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("btn_confirm_cancel_exercise").performClick()
+
+        composeTestRule.onNodeWithText("Lunges").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("current_exercise_name").assertTextEquals("Squats")
+    }
+
+    @Test
+    fun removedExercise_canBeUndone() {
+        addStrength("Squats", sets = "1")
+        addStrength("Lunges", sets = "1")
+        startWorkoutAndWaitForRunning()
+
+        composeTestRule.onAllNodesWithTag("btn_exercise_options").onFirst().performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("btn_remove_exercise").performClick()
+        composeTestRule.onNodeWithTag("btn_confirm_cancel_exercise").performClick()
+
+        composeTestRule.onNodeWithText("Lunges").assertDoesNotExist()
+
+        // The removal offers a one-tap Undo.
+        composeTestRule.waitUntil(3_000) {
+            composeTestRule.onAllNodesWithText("Undo").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithText("Undo").performClick()
+
+        composeTestRule.onNodeWithText("Lunges").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("current_exercise_name").assertTextEquals("Squats")
     }
 
     // ── cancel exercise ───────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 ---
 description: UI/UX design specialist. Focuses on Jetpack Compose design systems, Material Design 3, color palettes, animations, layout ergonomics, and accessibility.
 mode: all
-model: deepseek/deepseek-v4.1-flash
+model: opencode-go/deepseek-v4.1-flash
 steps: 25
 permissions:
   - action: edit

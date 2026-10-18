@@ -49,28 +49,30 @@ class WorkoutFlowTest {
 
     @Test
     fun startWorkout_transitionsToGracePhase() {
-        addStrengthExercise("Squats")
+        addTimedExercise("Plank")
         composeTestRule.onNodeWithTag("btn_start_workout").performClick()
-        composeTestRule.onNodeWithTag("screen_grace").assertIsDisplayed()
+        // Grace is now an in-card countdown on the live routine screen.
+        composeTestRule.onNodeWithTag("grace_countdown").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("running_status_label").assertTextEquals("READY")
     }
 
     @Test
     fun gracePhase_showsGetReadyHeading() {
-        addStrengthExercise("Squats")
+        addTimedExercise("Plank")
         composeTestRule.onNodeWithTag("btn_start_workout").performClick()
         composeTestRule.onNodeWithText("Get ready!").assertIsDisplayed()
     }
 
     @Test
     fun gracePhase_showsCountdownNumber() {
-        addStrengthExercise("Squats")
+        addTimedExercise("Plank")
         composeTestRule.onNodeWithTag("btn_start_workout").performClick()
         composeTestRule.onNodeWithTag("grace_countdown").assertIsDisplayed()
     }
 
     @Test
     fun gracePhase_pauseButton_pausesCountdown() {
-        addStrengthExercise("Squats")
+        addTimedExercise("Plank")
         composeTestRule.onNodeWithTag("btn_start_workout").performClick()
 
         composeTestRule.onNodeWithTag("btn_pause_continue").performClick()
@@ -82,7 +84,7 @@ class WorkoutFlowTest {
 
     @Test
     fun gracePhase_cancelButton_returnsToEditing() {
-        addStrengthExercise("Squats")
+        addTimedExercise("Plank")
         composeTestRule.onNodeWithTag("btn_start_workout").performClick()
 
         composeTestRule.onNodeWithText("Cancel").performClick()
@@ -92,13 +94,20 @@ class WorkoutFlowTest {
 
     @Test
     fun gracePhase_listShowsExercisesInWorkout() {
-        addStrengthExercise("Squats")
+        addTimedExercise("Plank")
         composeTestRule.onNodeWithTag("btn_start_workout").performClick()
 
-        composeTestRule.onNodeWithText("Today's workout").assertIsDisplayed()
-        composeTestRule.onAllNodesWithText("Squats")
+        // The routine list is the workout screen — the exercise is shown live.
+        composeTestRule.onAllNodesWithText("Plank")
             .onFirst()
             .assertIsDisplayed()
+    }
+
+    @Test
+    fun repBasedFirstExercise_skipsGraceAndStartsImmediately() {
+        addStrengthExercise("Squats")
+        composeTestRule.onNodeWithTag("btn_start_workout").performClick()
+        composeTestRule.onNodeWithTag("screen_running").assertIsDisplayed()
     }
 
     // ── RUNNING phase — rep-based step ────────────────────────────────────────
@@ -168,8 +177,21 @@ class WorkoutFlowTest {
         startWorkoutAndSkipGrace("Squats")
 
         composeTestRule.onNodeWithTag("btn_end_workout").performClick()
+        // Confirmation is required before leaving the workout.
+        composeTestRule.onNodeWithText("End workout?").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("btn_confirm_end_workout").performClick()
 
         composeTestRule.onNodeWithTag("screen_editing").assertIsDisplayed()
+    }
+
+    @Test
+    fun runningPhase_endWorkout_keepGoing_staysInWorkout() {
+        startWorkoutAndSkipGrace("Squats")
+
+        composeTestRule.onNodeWithTag("btn_end_workout").performClick()
+        composeTestRule.onNodeWithText("Keep going").performClick()
+
+        composeTestRule.onNodeWithTag("screen_running").assertIsDisplayed()
     }
 
     // ── RUNNING phase — rest step ─────────────────────────────────────────────
@@ -280,7 +302,7 @@ class WorkoutFlowTest {
             composeTestRule.onNode(hasText("Sets").and(hasSetTextAction()))
                 .performTextInput(sets)
         }
-        composeTestRule.onNodeWithTag("btn_submit_exercise").performClick()
+        composeTestRule.onNodeWithTag("btn_submit_exercise").performScrollTo().performClick()
     }
 
     private fun addExerciseWithRest(name: String, sets: String, restSecs: String) {
@@ -304,6 +326,18 @@ class WorkoutFlowTest {
      * the Settings sheet can be opened to set grace to 3 s, but that takes extra
      * steps. Instead we rely on waitUntil with a sufficient timeout.
      */
+    /** Adds a Timed exercise (so the workout starts with a countdown / grace period). */
+    private fun addTimedExercise(name: String) {
+        openAddExerciseSheet()
+        composeTestRule.onNodeWithText("Timed").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("field_exercise_name").performTextInput(name)
+        composeTestRule.onNode(hasText("Sets").and(hasSetTextAction())).performTextInput("3")
+        composeTestRule.onNode(hasText("Duration").and(hasSetTextAction())).performTextInput("30")
+        composeTestRule.onNodeWithTag("btn_submit_exercise").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+    }
+
     private fun startGraceAndWaitForRunning() {
         composeTestRule.onNodeWithTag("btn_start_workout").performClick()
 

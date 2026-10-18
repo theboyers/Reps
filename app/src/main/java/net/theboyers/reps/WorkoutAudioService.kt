@@ -103,9 +103,15 @@ class WorkoutAudioService : Service() {
             handler.postDelayed(runnable, (at - System.currentTimeMillis()).coerceAtLeast(0L))
         }
 
-        val release = Runnable { releaseWakeLock() }
-        scheduled.add(release)
-        handler.postDelayed(release, (lastAt - System.currentTimeMillis()).coerceAtLeast(0L) + CUE_WINDOW_MARGIN_MS)
+        // Once the cues run out, shut the service down so it never lingers in
+        // the background (a new schedule cancels this via cancelScheduled()).
+        val finish = Runnable {
+            releaseWakeLock()
+            stopEverything()
+            stopSelf()
+        }
+        scheduled.add(finish)
+        handler.postDelayed(finish, (lastAt - System.currentTimeMillis()).coerceAtLeast(0L) + CUE_WINDOW_MARGIN_MS)
     }
 
     private fun play(cueType: Int) {

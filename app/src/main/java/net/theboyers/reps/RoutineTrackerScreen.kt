@@ -2,6 +2,10 @@ package net.theboyers.reps
 
 import androidx.core.content.ContextCompat
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
@@ -41,10 +45,12 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.FitnessCenter
+import androidx.compose.material.icons.rounded.FileDownload
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
@@ -80,8 +86,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -104,15 +112,20 @@ import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -146,6 +159,19 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.rememberModalBottomSheetState
 
+/** Optional per-set override for a strength exercise (pyramids, drop sets). */
+data class RoutineSet(
+    /** Reps for this set; null/blank falls back to the exercise's reps. */
+    val reps: String? = null,
+    /** Canonical weight label for this set; null/blank falls back to the exercise's weight. */
+    val weight: String? = null,
+    /** Effort tag for this set (e.g. "AMRAP", "RPE 8", "To failure"); null/blank falls back. */
+    val tag: String? = null
+)
+
+/** Effort tags that can be attached to a set. */
+val repTagOptions = listOf("AMRAP", "RPE 6", "RPE 7", "RPE 8", "RPE 9", "RPE 10", "To failure")
+
 data class RoutineEntry(
     val exerciseName: String,
     val details: String,
@@ -161,7 +187,14 @@ data class RoutineEntry(
     /** Reps for each warmup set; null/blank falls back to the working reps. */
     val warmupReps: String? = null,
     /** Canonical weight label for warmup sets; null/blank falls back to the working weight. */
-    val warmupWeight: String? = null
+    val warmupWeight: String? = null,
+    /**
+     * Per-set overrides for the working sets (index 0 = first set). Null/empty means
+     * every set uses the exercise's [repsOrDuration] and [weight].
+     */
+    val perSet: List<RoutineSet>? = null,
+    /** Exercise-wide effort tag (e.g. "AMRAP", "RPE 8") used when [perSet] has no tag. */
+    val repTag: String? = null
 )
 
 /** A named workout routine stored in the user's library. */
@@ -189,7 +222,34 @@ data class WorkoutSession(
     val exerciseNames: List<String> = emptyList()
 )
 
+/** Snapshot of the workout plan so a destructive action can be undone. */
+data class PlanSnapshot(
+    val entries: List<RoutineEntry>,
+    val entryIds: List<String>,
+    val currentStepIndex: Int,
+    val stepEndTimeMs: Long,
+    val timerSecondsRemaining: Int,
+    val completedWorkSteps: List<WorkoutStep.Work>
+)
+
+/** Persisted snapshot so the builder and an in-progress workout survive process death. */
+data class WorkoutDraft(
+    val entries: List<RoutineEntry> = emptyList(),
+    val restBetweenExercisesSeconds: Int = 0,
+    val editingRoutineId: String? = null,
+    val phase: String = "EDITING",
+    val currentStepIndex: Int = 0,
+    val workoutStartTimeMs: Long = 0L,
+    val isPaused: Boolean = false,
+    val completedSets: List<WorkoutStep.Work> = emptyList()
+)
+
 val intensityOptions  = listOf("Easy", "Moderate", "Hard", "Max")
+/** Burnt orange used to make warmup sets stand out (dark enough for AA contrast with white text). */
+val WarmupOrange = Color(0xFFB34700)
+
+/** Content is centered and capped at this width so it stays readable on tablets/landscape. */
+val ContentMaxWidth = 640.dp
 // Ordered roughly head-to-toe, with whole-body and non-strength categories last.
 val muscleGroupOptions = listOf(
     "Neck & Traps",
@@ -368,7 +428,8 @@ sealed class WorkoutStep {
         val side: String = "",
         val weight: String = "",
         val isWarmup: Boolean = false,
-        val exerciseIndex: Int = 0
+        val exerciseIndex: Int = 0,
+        val tag: String = ""
     ) : WorkoutStep()
 
     data class Rest(
@@ -417,6 +478,11 @@ fun buildWorkoutSteps(
 
         var stepNum = 0
         repeat(setsPerSide) { setIdx ->
+            // Per-set override (strength only); blank fields fall back to the exercise values.
+            val setOverride = if (entry.type == "STRENGTH") entry.perSet?.getOrNull(setIdx) else null
+            val setReps = setOverride?.reps?.takeIf { it.isNotBlank() } ?: entry.repsOrDuration
+            val setWeight = setOverride?.weight?.takeIf { it.isNotBlank() } ?: entry.weight.orEmpty()
+            val setTag = setOverride?.tag?.takeIf { it.isNotBlank() } ?: entry.repTag.orEmpty()
             sides.forEachIndexed { sideIdx, side ->
                 stepNum++
                 steps.add(
@@ -425,11 +491,12 @@ fun buildWorkoutSteps(
                         details = entry.details,
                         setNumber = stepNum,
                         totalSets = totalSets,
-                        repsOrDurationLabel = entry.repsOrDuration,
-                        durationSeconds = parseWorkDurationSeconds(entry.repsOrDuration) ?: 0,
+                        repsOrDurationLabel = setReps,
+                        durationSeconds = parseWorkDurationSeconds(setReps) ?: 0,
                         side = side,
-                        weight = entry.weight.orEmpty(),
-                        exerciseIndex = exIdx
+                        weight = setWeight,
+                        exerciseIndex = exIdx,
+                        tag = setTag
                     )
                 )
                 val isLastStep = setIdx == setsPerSide - 1 && sideIdx == sides.lastIndex
@@ -449,6 +516,21 @@ fun buildWorkoutSteps(
     }
     return steps
 }
+
+/** Human-readable summary of an exercise (sets/reps/weight/tag/rest) for card meta. */
+fun exerciseMeta(entry: RoutineEntry): String = buildList {
+    if (entry.sets.isNotBlank()) {
+        val setsInt = entry.sets.toIntOrNull() ?: 1
+        if (entry.isPerSide) add("${setsInt * 2} sets (${setsInt}/side)")
+        else add("$setsInt set${if (setsInt != 1) "s" else ""}")
+    }
+    if (entry.repsOrDuration.isNotBlank()) add(formatRepsLabel(entry.repsOrDuration))
+    entry.weight?.takeIf { it.isNotBlank() }?.let { add(it) }
+    entry.repTag?.takeIf { it.isNotBlank() }?.let { add(it) }
+    if (entry.warmupSets > 0) add("${entry.warmupSets} warmup")
+    if (!entry.perSet.isNullOrEmpty()) add("per-set")
+    if (entry.restBetweenSetsSeconds > 0) add("${formatDuration(entry.restBetweenSetsSeconds)} rest")
+}.joinToString(" · ")
 
 /** A timed audio cue scheduled at an absolute wall-clock time. */
 enum class AudioCueType { TICK, REST_END, TIMER_END }
@@ -643,8 +725,12 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     var warmupReps by rememberSaveable { mutableStateOf("") }
     var warmupWeightAmount by rememberSaveable { mutableStateOf("") }
     var warmupWeightUnit by rememberSaveable { mutableStateOf(WeightUnit.LB) }
+    var repTag by rememberSaveable { mutableStateOf("") }
+    var perSetEnabled by rememberSaveable { mutableStateOf(false) }
+    val perSetRows = remember { mutableStateListOf<RoutineSet>() }
     var routineRestBetweenExercisesAmount by rememberSaveable { mutableStateOf("") }
     var routineRestBetweenExercisesUnit by rememberSaveable { mutableStateOf(RestUnit.SECONDS) }
+    var defaultWeightUnit by rememberSaveable { mutableStateOf(WeightUnit.LB) }
     val routineRestBetweenExercisesSeconds = parseRestSeconds(routineRestBetweenExercisesAmount, routineRestBetweenExercisesUnit) ?: 0
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var editingIndex by remember { mutableStateOf<Int?>(null) }
@@ -667,12 +753,15 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         exerciseType = ExerciseType.STRENGTH
         isPerSide = false
         weightAmount = ""
-        weightUnit = WeightUnit.LB
+        weightUnit = defaultWeightUnit
         warmupEnabled = false
         warmupSets = "1"
         warmupReps = ""
         warmupWeightAmount = ""
-        warmupWeightUnit = WeightUnit.LB
+        warmupWeightUnit = defaultWeightUnit
+        repTag = ""
+        perSetEnabled = false
+        perSetRows.clear()
         errorMessage = null
         editingIndex = null
     }
@@ -691,6 +780,12 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         warmupReps = e.warmupReps.orEmpty()
         warmupWeightAmount = weightAmountOf(e.warmupWeight)
         warmupWeightUnit = weightUnitOf(e.warmupWeight)
+        perSetEnabled = !e.perSet.isNullOrEmpty()
+        perSetRows.clear()
+        e.perSet.orEmpty().forEach { s ->
+            perSetRows.add(RoutineSet(reps = s.reps.orEmpty(), weight = weightAmountOf(s.weight), tag = s.tag.orEmpty()))
+        }
+        repTag = e.repTag.orEmpty()
         val sec = e.restBetweenSetsSeconds
         if (sec > 0 && sec % 60 == 0) {
             restBetweenSetsAmount = (sec / 60).toString()
@@ -716,6 +811,17 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         }
         errorMessage = null
         editingIndex = index
+    }
+
+    fun syncPerSetRows(count: Int) {
+        val n = count.coerceAtLeast(0)
+        while (perSetRows.size > n) perSetRows.removeAt(perSetRows.lastIndex)
+        while (perSetRows.size < n) perSetRows.add(RoutineSet())
+    }
+
+    fun setPerSetRow(i: Int, transform: (RoutineSet) -> RoutineSet) {
+        while (perSetRows.size <= i) perSetRows.add(RoutineSet())
+        perSetRows[i] = transform(perSetRows[i])
     }
 
     var workoutPhase by rememberSaveable { mutableStateOf(WorkoutPhase.EDITING) }
@@ -754,18 +860,24 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     DisposableEffect(Unit) {
         onDispose {
             toneGen.release()
-            context.startService(WorkoutAudioService.stopIntent(context))
+            try {
+                context.stopService(android.content.Intent(context, WorkoutAudioService::class.java))
+            } catch (_: Exception) {}
         }
     }
 
     // Tracks whether the foreground audio service is currently running so we
     // don't repeatedly start/stop it on every recomposition.
     var audioServiceStarted by remember { mutableStateOf(false) }
+    // True while the app is on screen (the UI then plays cues itself).
+    var appInForeground by remember { mutableStateOf(true) }
 
 
     var hasSavedRoutine by remember { mutableStateOf(false) }
     val savedRoutines = remember { mutableStateListOf<SavedRoutine>() }
     val workoutHistory = remember { mutableStateListOf<WorkoutSession>() }
+    // Recent settings per exercise (lowercased name) used to prefill the form.
+    val recentDefaults = remember { mutableStateMapOf<String, RoutineEntry>() }
     var showHistorySheet by remember { mutableStateOf(false) }
     val historySheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var workoutNote by rememberSaveable { mutableStateOf("") }
@@ -777,6 +889,9 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     var showExerciseSheet by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showClearAllDialog by remember { mutableStateOf(false) }
+    var showEndWorkoutConfirm by remember { mutableStateOf(false) }
+    var pendingResumeDraft by remember { mutableStateOf<WorkoutDraft?>(null) }
+    var draftLoaded by remember { mutableStateOf(false) }
     var clearAfterSave     by remember { mutableStateOf(false) }
     val saveSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val loadSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -819,6 +934,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         keepScreenOn    = prefs.getBoolean("pref_keep_screen_on", true)
         themePreference = prefs.getString("pref_theme", "system") ?: "system"
         countUp         = prefs.getBoolean("pref_count_up", false)
+        defaultWeightUnit =
+            if (prefs.getString("pref_default_weight_unit", "lb") == "kg") WeightUnit.KG else WeightUnit.LB
         val defaultRest = prefs.getInt("pref_default_rest_between_exercises", 0)
         defaultRestBetweenExSecs = defaultRest
         // Seed the current routine's rest field from the global default.
@@ -864,6 +981,44 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 workoutHistory.addAll(history)
             } catch (_: Exception) {}
         }
+
+        val recentJson = prefs.getString("recent_defaults", null)
+        if (recentJson != null) {
+            try {
+                val recentType = object : TypeToken<Map<String, RoutineEntry>>() {}.type
+                val map: Map<String, RoutineEntry> = gson.fromJson(recentJson, recentType) ?: emptyMap()
+                recentDefaults.putAll(map)
+            } catch (_: Exception) {}
+        }
+
+        // Restore the working routine (and any unfinished workout) after process death.
+        val draftJson = prefs.getString("workout_draft", null)
+        if (draftJson != null) {
+            try {
+                val draft = gson.fromJson(draftJson, WorkoutDraft::class.java)
+                if (draft != null && draft.entries.isNotEmpty()) {
+                    routineEntries.clear()
+                    entryIds.clear()
+                    routineEntries.addAll(draft.entries)
+                    entryIds.addAll(draft.entries.map { UUID.randomUUID().toString() })
+                    val restSec = draft.restBetweenExercisesSeconds
+                    if (restSec > 0 && restSec % 60 == 0) {
+                        routineRestBetweenExercisesAmount = (restSec / 60).toString()
+                        routineRestBetweenExercisesUnit = RestUnit.MINUTES
+                    } else {
+                        routineRestBetweenExercisesAmount = if (restSec > 0) restSec.toString() else ""
+                        routineRestBetweenExercisesUnit = RestUnit.SECONDS
+                    }
+                    editingRoutine = savedRoutines.firstOrNull { it.id == draft.editingRoutineId }
+                    completedWorkSteps.clear()
+                    completedWorkSteps.addAll(draft.completedSets)
+                    if (draft.phase == WorkoutPhase.RUNNING.name || draft.phase == WorkoutPhase.GRACE.name) {
+                        pendingResumeDraft = draft
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        draftLoaded = true
     }
 
     fun persistLibrary() {
@@ -873,6 +1028,49 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
 
     fun persistHistory() {
         prefs.edit().putString("workout_history", gson.toJson(workoutHistory.toList())).apply()
+    }
+
+    fun persistRecentDefaults() {
+        prefs.edit().putString("recent_defaults", gson.toJson(recentDefaults.toMap())).apply()
+    }
+
+    /** Records an exercise's settings as the "recent" defaults for its name. */
+    fun rememberRecent(entry: RoutineEntry) {
+        val key = entry.exerciseName.trim().lowercase()
+        if (key.isBlank()) return
+        recentDefaults[key] = entry
+        persistRecentDefaults()
+    }
+
+    /** Prefills sets/reps/rest/weight from the last time this exercise name was used. */
+    fun applyRecentDefaults(name: String) {
+        if (name.isBlank()) return
+        // Only fill a fresh form — never clobber what the user has typed.
+        if (sets.isNotBlank() || repsOrDuration.isNotBlank()) return
+        val recent = recentDefaults[name.trim().lowercase()] ?: return
+        if (recent.type != "STRENGTH" || exerciseType != ExerciseType.STRENGTH) return
+        sets = recent.sets
+        repsOrDuration = recent.repsOrDuration
+        weightAmount = weightAmountOf(recent.weight)
+        weightUnit = weightUnitOf(recent.weight)
+        val sec = recent.restBetweenSetsSeconds
+        if (sec > 0 && sec % 60 == 0) {
+            restBetweenSetsAmount = (sec / 60).toString()
+            restBetweenSetsUnit = RestUnit.MINUTES
+        } else {
+            restBetweenSetsAmount = if (sec > 0) sec.toString() else ""
+            restBetweenSetsUnit = RestUnit.SECONDS
+        }
+    }
+
+    fun deleteHistoryEntry(id: String) {
+        workoutHistory.removeAll { it.id == id }
+        persistHistory()
+    }
+
+    fun clearHistory() {
+        workoutHistory.clear()
+        persistHistory()
     }
 
     fun saveRoutineToLibrary(name: String, intensity: String, muscleGroup: String) {
@@ -957,6 +1155,17 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         persistLibrary()
     }
 
+    fun duplicateRoutine(routine: SavedRoutine) {
+        val copy = routine.copy(
+            id = UUID.randomUUID().toString(),
+            name = "${routine.name?.takeIf { it.isNotBlank() } ?: "Routine"} (copy)",
+            savedAt = System.currentTimeMillis()
+        )
+        savedRoutines.add(0, copy)
+        persistLibrary()
+        coroutineScope.launch { snackbarHostState.showSnackbar("Routine duplicated!") }
+    }
+
     /**
      * Advances to the next step and seeds its countdown timer. Marks the workout
      * complete if there are no more steps.
@@ -986,17 +1195,40 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         }
     }
 
+    /** Stops the background audio service if it is running. */
+    fun stopAudioService() {
+        if (audioServiceStarted) {
+            try {
+                context.stopService(android.content.Intent(context, WorkoutAudioService::class.java))
+            } catch (_: Exception) {}
+            audioServiceStarted = false
+        }
+    }
+
+    /** Ends the current workout and returns to the builder. */
+    fun endWorkout() {
+        stopAudioService()
+        workoutPhase = WorkoutPhase.EDITING
+        isPaused = false
+        pausedAtMs = 0L
+    }
+
+    /** Discards an unfinished workout on launch, keeping the restored routine. */
+    fun discardDraftResume() {
+        pendingResumeDraft = null
+        workoutPhase = WorkoutPhase.EDITING
+        prefs.edit().remove("workout_draft").apply()
+    }
+
     /**
-     * Publishes the current timed-cue schedule to the foreground audio service
-     * (or stops it) so ticks and tones fire on time with the screen off.
+     * Runs the background audio service only when the app is off screen during a
+     * timer (a rest or a timed/cardio step). While the app is visible the UI plays
+     * the cues itself, so no service or wakelock is held.
      */
     fun updateWorkoutAudio() {
-        val delegate = soundEnabled && backgroundAudioEnabled
+        val delegate = soundEnabled && backgroundAudioEnabled && !appInForeground
         if (!delegate || workoutPhase != WorkoutPhase.RUNNING || isPaused) {
-            if (audioServiceStarted) {
-                context.startService(WorkoutAudioService.stopIntent(context))
-                audioServiceStarted = false
-            }
+            stopAudioService()
             return
         }
         val cues = buildAudioCueSchedule(
@@ -1006,12 +1238,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             nowMs = System.currentTimeMillis()
         )
         if (cues.isEmpty()) {
-            // Nothing timed pending (e.g. waiting on a rep-based step) — let the
-            // device sleep and release the foreground service.
-            if (audioServiceStarted) {
-                context.startService(WorkoutAudioService.stopIntent(context))
-                audioServiceStarted = false
-            }
+            // Waiting on a rep-based step — nothing to keep awake.
+            stopAudioService()
             return
         }
         try {
@@ -1025,8 +1253,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             )
             audioServiceStarted = true
         } catch (_: Exception) {
-            // Foreground start can be refused if the app is not visible; the
-            // in-app tone generator still covers the foreground case.
+            // Foreground start can be refused; the in-app tones still cover the
+            // foreground case, and the service self-stops when cues run out.
             audioServiceStarted = false
         }
     }
@@ -1044,6 +1272,27 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
 
     /** Re-seeds the current step's countdown after the plan changes underneath it. */
     fun seedCurrentStepTimer() = seedTimer(workoutSteps, currentStepIndex)
+
+    /** Resumes an unfinished workout found on launch, restarting the current step's timer. */
+    fun resumeDraft(draft: WorkoutDraft) {
+        val steps = buildWorkoutSteps(routineEntries, routineRestBetweenExercisesSeconds)
+        currentStepIndex = draft.currentStepIndex.coerceIn(0, maxOf(0, steps.size - 1))
+        isPaused = false
+        pausedAtMs = 0L
+        workoutStartTimeMs = System.currentTimeMillis()
+        workoutEndTimeMs = 0L
+        if (draft.phase == WorkoutPhase.GRACE.name) {
+            workoutPhase = WorkoutPhase.GRACE
+            graceSecondsRemaining = gracePeriodPref
+            graceEndTimeMs = System.currentTimeMillis() + gracePeriodPref * 1000L
+            timerSecondsRemaining = 0
+            stepEndTimeMs = 0L
+        } else {
+            workoutPhase = WorkoutPhase.RUNNING
+            if (steps.isNotEmpty()) seedTimer(steps, currentStepIndex) else timerSecondsRemaining = 0
+        }
+        pendingResumeDraft = null
+    }
 
     /** Moves an exercise (and its parallel id) within the routine, keeping edit state sane. */
     fun moveEntry(from: Int, to: Int) {
@@ -1071,6 +1320,89 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         planVersion++
     }
 
+    /** 0-based round index of the working set in play for [entryIndex], or null. */
+    fun currentSetIndexFor(entryIndex: Int): Int? {
+        val ws = currentWorkStep ?: return null
+        if (ws.exerciseIndex != entryIndex || ws.isWarmup) return null
+        val sides = if (routineEntries.getOrNull(entryIndex)?.isPerSide == true) 2 else 1
+        return (ws.setNumber - 1) / sides
+    }
+
+    /** Rewrites one set override on [entryIndex] (extending the list as needed). */
+    fun updateSetOverride(entryIndex: Int, setIdx: Int, transform: (RoutineSet) -> RoutineSet) {
+        val entry = routineEntries[entryIndex]
+        val list = entry.perSet.orEmpty().toMutableList()
+        while (list.size <= setIdx) list.add(RoutineSet())
+        list[setIdx] = transform(list[setIdx])
+        routineEntries[entryIndex] = entry.copy(perSet = list)
+        planVersion++
+    }
+
+    /** Adjusts reps for the set in play (per-set if the exercise uses overrides). */
+    fun adjustRepsForCurrent(delta: Int) {
+        val exIdx = adjustSheetExIdx ?: upcomingExerciseIndex
+        if (exIdx !in routineEntries.indices) return
+        val entry = routineEntries[exIdx]
+        val setIdx = currentSetIndexFor(exIdx)
+        if (!entry.perSet.isNullOrEmpty() && setIdx != null) {
+            val base = entry.perSet.getOrNull(setIdx)?.reps?.takeIf { it.isNotBlank() } ?: entry.repsOrDuration
+            updateSetOverride(exIdx, setIdx) { it.copy(reps = shiftReps(base, delta)) }
+        } else {
+            updateCurrentExercise { e -> e.copy(repsOrDuration = shiftReps(e.repsOrDuration, delta)) }
+        }
+    }
+
+    /** Adjusts weight for the set in play (per-set if the exercise uses overrides). */
+    fun adjustWeightForCurrent(delta: Double, unit: WeightUnit) {
+        val exIdx = adjustSheetExIdx ?: upcomingExerciseIndex
+        if (exIdx !in routineEntries.indices) return
+        val entry = routineEntries[exIdx]
+        val setIdx = currentSetIndexFor(exIdx)
+        if (!entry.perSet.isNullOrEmpty() && setIdx != null) {
+            val base = entry.perSet.getOrNull(setIdx)?.weight?.takeIf { it.isNotBlank() } ?: entry.weight
+            updateSetOverride(exIdx, setIdx) { it.copy(weight = shiftWeight(base, delta, unit)) }
+        } else {
+            updateCurrentExercise { e -> e.copy(weight = shiftWeight(e.weight, delta, unit)) }
+        }
+    }
+
+    fun snapshotPlan() = PlanSnapshot(
+        entries = routineEntries.toList(),
+        entryIds = entryIds.toList(),
+        currentStepIndex = currentStepIndex,
+        stepEndTimeMs = stepEndTimeMs,
+        timerSecondsRemaining = timerSecondsRemaining,
+        completedWorkSteps = completedWorkSteps.toList()
+    )
+
+    fun restorePlan(snapshot: PlanSnapshot) {
+        routineEntries.clear()
+        routineEntries.addAll(snapshot.entries)
+        entryIds.clear()
+        entryIds.addAll(snapshot.entryIds)
+        currentStepIndex = snapshot.currentStepIndex
+        stepEndTimeMs = snapshot.stepEndTimeMs
+        timerSecondsRemaining = snapshot.timerSecondsRemaining
+        completedWorkSteps.clear()
+        completedWorkSteps.addAll(snapshot.completedWorkSteps)
+        planVersion++
+    }
+
+    /** Runs a destructive action and offers a one-tap Undo in a snackbar. */
+    fun withUndo(message: String, block: () -> Unit) {
+        val snapshot = snapshotPlan()
+        block()
+        coroutineScope.launch {
+            val result = snackbarHostState.showSnackbar(
+                message = message,
+                actionLabel = "Undo",
+                withDismissAction = false,
+                duration = SnackbarDuration.Short
+            )
+            if (result == SnackbarResult.ActionPerformed) restorePlan(snapshot)
+        }
+    }
+
     /** Defers the current exercise to the end of the routine ("machine busy — do later"). */
     fun doLaterCurrentExercise() {
         val idx = upcomingExerciseIndex
@@ -1090,6 +1422,15 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
     }
 
     /** Removes an exercise from the workout entirely, resuming at the next exercise. */
+    /** Inserts a copy of the exercise at [index] directly after it. */
+    fun duplicateEntry(index: Int) {
+        if (index !in routineEntries.indices) return
+        entryIds.add(index + 1, UUID.randomUUID().toString())
+        routineEntries.add(index + 1, routineEntries[index])
+        val ei = editingIndex
+        if (ei != null && ei > index) editingIndex = ei + 1
+    }
+
     fun cancelExercise(entryIndex: Int) {
         if (entryIndex !in routineEntries.indices) return
         routineEntries.removeAt(entryIndex)
@@ -1114,6 +1455,71 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         }
     }
 
+    /** Removes an exercise that hasn't started yet, keeping the current position intact. */
+    fun removeFutureExercise(entryIndex: Int) {
+        if (entryIndex !in routineEntries.indices) return
+        if (entryIndex <= upcomingExerciseIndex) return
+        routineEntries.removeAt(entryIndex)
+        if (entryIndex < entryIds.size) entryIds.removeAt(entryIndex)
+        editingIndex = editingIndex?.let { idx ->
+            when {
+                idx == entryIndex -> null
+                idx > entryIndex -> idx - 1
+                else -> idx
+            }
+        }
+        planVersion++
+    }
+
+    /** Removes an exercise: the current one is cancelled, a future one is simply dropped. */
+    fun removeExerciseAt(index: Int) {
+        if (index == upcomingExerciseIndex) cancelExercise(index) else removeFutureExercise(index)
+    }
+
+    /**
+     * Skips the current exercise's remaining sets and defers them to the end of
+     * the routine, so the user can free up a machine and come back to it later.
+     */
+    fun skipRestOfExercise() {
+        val exIdx = upcomingExerciseIndex
+        if (exIdx !in routineEntries.indices) return
+        val entry = routineEntries[exIdx]
+        val totalSets = entry.sets.toIntOrNull() ?: 1
+        val sides = if (entry.isPerSide) 2 else 1
+        val doneRounds = workoutSteps.take(currentStepIndex)
+            .count { it is WorkoutStep.Work && it.exerciseIndex == exIdx && !it.isWarmup } / sides
+        val remaining = (totalSets - doneRounds).coerceAtLeast(0)
+        val hasLaterExercise = exIdx < routineEntries.lastIndex
+
+        if (remaining <= 0 || !hasLaterExercise) {
+            // Nothing left to defer — just move to the next exercise (or finish).
+            val resume = if (hasLaterExercise) firstStepOfExercise(workoutSteps, exIdx + 1) else -1
+            if (resume < 0) {
+                workoutEndTimeMs = System.currentTimeMillis()
+                workoutPhase = WorkoutPhase.COMPLETE
+            } else {
+                currentStepIndex = resume
+                seedTimer(workoutSteps, resume)
+            }
+            return
+        }
+
+        // Keep already-completed sets; defer the remaining sets to the end.
+        if (doneRounds > 0) {
+            routineEntries[exIdx] = entry.copy(sets = remaining.toString(), warmupSets = 0)
+        }
+        moveEntry(exIdx, routineEntries.lastIndex)
+        val newSteps = buildWorkoutSteps(routineEntries, routineRestBetweenExercisesSeconds)
+        val resume = firstStepOfExercise(newSteps, exIdx)
+        if (resume < 0) {
+            workoutEndTimeMs = System.currentTimeMillis()
+            workoutPhase = WorkoutPhase.COMPLETE
+        } else {
+            currentStepIndex = resume
+            seedTimer(newSteps, resume)
+        }
+    }
+
     /** Toggles pause/resume, keeping the wall-clock end times accurate. */
     fun handlePauseToggle() {
         val now = System.currentTimeMillis()
@@ -1129,12 +1535,37 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         }
     }
 
+    /** Nudges the current timed step (or rest) by [deltaSeconds]. */
+    fun adjustStepTime(deltaSeconds: Int) {
+        if (workoutPhase != WorkoutPhase.RUNNING || stepEndTimeMs <= 0L) return
+        val now = if (isPaused && pausedAtMs > 0L) pausedAtMs else System.currentTimeMillis()
+        stepEndTimeMs += deltaSeconds * 1000L
+        timerSecondsRemaining = kotlin.math.ceil((stepEndTimeMs - now) / 1000.0)
+            .toInt().coerceAtLeast(0)
+        planVersion++
+    }
+
     // Apply keep-screen-on window flag based on user preference.
     val activity = LocalActivity.current
     LaunchedEffect(keepScreenOn) {
         val flags = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         if (keepScreenOn) activity?.window?.addFlags(flags)
         else activity?.window?.clearFlags(flags)
+    }
+
+    // Track whether the app is on screen. The UI plays sound cues itself while
+    // visible; the background audio service is only used when the app is not.
+    DisposableEffect(activity) {
+        val lifecycle = (activity as? androidx.lifecycle.LifecycleOwner)?.lifecycle
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> appInForeground = true
+                Lifecycle.Event.ON_PAUSE -> appInForeground = false
+                else -> {}
+            }
+        }
+        lifecycle?.addObserver(observer)
+        onDispose { lifecycle?.removeObserver(observer) }
     }
 
     // File picker for exporting the routine library to JSON.
@@ -1185,6 +1616,22 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         }
     }
 
+    // File picker for exporting the workout history to JSON.
+    val historyExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(gson.toJson(workoutHistory.toList()).toByteArray())
+                }
+                coroutineScope.launch { snackbarHostState.showSnackbar("History exported!") }
+            } catch (_: Exception) {
+                coroutineScope.launch { snackbarHostState.showSnackbar("Export failed.") }
+            }
+        }
+    }
+
     // Counts down the grace period before the first workout step begins.
     // Uses wall-clock time so the countdown continues correctly when the app is backgrounded.
     LaunchedEffect(workoutPhase, isPaused) {
@@ -1214,7 +1661,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
 
     // Per-step countdown timer; auto-advances to the next step on expiry.
     // Uses wall-clock time so the timer continues correctly when the app is backgrounded.
-    LaunchedEffect(workoutPhase, isPaused, currentStepIndex, planVersion) {
+    LaunchedEffect(workoutPhase, isPaused, currentStepIndex, planVersion, appInForeground, backgroundAudioEnabled) {
         if (workoutPhase != WorkoutPhase.RUNNING || isPaused || stepEndTimeMs == 0L) return@LaunchedEffect
         while (true) {
             val remaining = kotlin.math.ceil(
@@ -1228,10 +1675,15 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 // Only beep if this step ended roughly on time — avoids a burst of
                 // dings when catching up after being backgrounded.
                 val onTime = System.currentTimeMillis() - stepEndTimeMs < 1_500L
-                // When background audio is enabled the service owns all timed cues.
-                val playHere = soundEnabled && !backgroundAudioEnabled && onTime
+                // The UI owns audio while it is on screen (or background audio is off);
+                // otherwise the service plays it.
+                val playHere = soundEnabled && (!backgroundAudioEnabled || appInForeground) && onTime
                 if (shouldDing && playHere) {
-                    toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 600)
+                    val tone = if (step is WorkoutStep.Rest)
+                        android.media.ToneGenerator.TONE_PROP_ACK
+                    else
+                        android.media.ToneGenerator.TONE_PROP_BEEP2
+                    toneGen.startTone(tone, 500)
                 }
                 advanceStep(anchorMs = stepEndTimeMs)
                 break
@@ -1240,21 +1692,50 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         }
     }
 
-    // Publishes the timed-cue schedule to the foreground audio service whenever
-    // the running state changes, so ticks/tones fire with the screen off.
+    // Runs the background audio service only when the app is off screen during a
+    // timer; stops it otherwise.
     LaunchedEffect(
         workoutPhase, currentStepIndex, isPaused, stepEndTimeMs,
-        soundEnabled, backgroundAudioEnabled, planVersion
+        soundEnabled, backgroundAudioEnabled, appInForeground, planVersion
     ) {
         updateWorkoutAudio()
     }
 
+    // Persist the working routine and any in-progress workout so process death
+    // doesn't lose it. Runs after the launch-time load so it can't clobber it, and
+    // re-saves when the app goes to the background (when an OS kill is most likely).
+    LaunchedEffect(
+        draftLoaded, workoutPhase, currentStepIndex, isPaused,
+        routineRestBetweenExercisesSeconds, editingRoutine?.id,
+        routineEntries.toList(), completedWorkSteps.size, appInForeground
+    ) {
+        if (!draftLoaded) return@LaunchedEffect
+        val draft = WorkoutDraft(
+            entries = routineEntries.toList(),
+            restBetweenExercisesSeconds = routineRestBetweenExercisesSeconds,
+            editingRoutineId = editingRoutine?.id,
+            phase = workoutPhase.name,
+            currentStepIndex = currentStepIndex,
+            workoutStartTimeMs = workoutStartTimeMs,
+            isPaused = isPaused,
+            completedSets = completedWorkSteps.toList()
+        )
+        prefs.edit().putString("workout_draft", gson.toJson(draft)).apply()
+    }
+
     val hapticFeedback = LocalHapticFeedback.current
 
-    // Haptic pulse for the last 3 seconds of any timed step or rest.
-    LaunchedEffect(timerSecondsRemaining) {
-        if (workoutPhase == WorkoutPhase.RUNNING && !isPaused && timerSecondsRemaining in 1..3) {
-            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+    // Haptic pulse for the last 3 seconds of any timed step or rest, and an
+    // audible tick for the final 5 seconds of a rest (when the UI owns audio).
+    LaunchedEffect(timerSecondsRemaining, appInForeground, backgroundAudioEnabled) {
+        if (workoutPhase == WorkoutPhase.RUNNING && !isPaused) {
+            if (timerSecondsRemaining in 1..3) {
+                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+            }
+            val uiOwnsAudio = soundEnabled && (!backgroundAudioEnabled || appInForeground)
+            if (uiOwnsAudio && currentStep is WorkoutStep.Rest && timerSecondsRemaining in 1..5) {
+                toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 90)
+            }
         }
     }
 
@@ -1553,20 +2034,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
-                                        val meta = buildList {
-                                            if (entry.sets.isNotBlank()) {
-                                                val setsInt = entry.sets.toIntOrNull() ?: 1
-                                                if (entry.isPerSide) {
-                                                    add("${setsInt * 2} sets (${setsInt}/side)")
-                                                } else {
-                                                    add("${setsInt} set${if (setsInt != 1) "s" else ""}")
-                                                }
-                                            }
-                                            if (entry.repsOrDuration.isNotBlank()) add(formatRepsLabel(entry.repsOrDuration))
-                                            entry.weight?.takeIf { it.isNotBlank() }?.let { add(it) }
-                                            if (entry.warmupSets > 0) add("${entry.warmupSets} warmup")
-                                            if (entry.restBetweenSetsSeconds > 0) add("${formatDuration(entry.restBetweenSetsSeconds)} rest")
-                                        }.joinToString(" · ")
+                                        val meta = exerciseMeta(entry)
                                         if (meta.isNotBlank()) {
                                             Text(
                                                 meta,
@@ -1578,8 +2046,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                     // Three-dot overflow menu.
                                     Box {
                                         IconButton(
-                                            onClick = { exerciseMenuOpenIndex = index },
-                                            modifier = Modifier.size(40.dp)
+                                            onClick = { exerciseMenuOpenIndex = index }
                                         ) {
                                             Icon(
                                                 Icons.Rounded.MoreVert,
@@ -1605,6 +2072,20 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                                     loadEntryIntoForm(index)
                                                     showExerciseSheet = true
                                                 }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Duplicate") },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        Icons.Rounded.ContentCopy,
+                                                        contentDescription = null
+                                                    )
+                                                },
+                                                onClick = {
+                                                    exerciseMenuOpenIndex = null
+                                                    duplicateEntry(index)
+                                                },
+                                                modifier = Modifier.semantics { testTag = "menu_duplicate_exercise" }
                                             )
                                             DropdownMenuItem(
                                                 text = {
@@ -1700,17 +2181,31 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             Spacer(Modifier.height(4.dp))
                             Button(
                                     onClick = {
-                                        workoutPhase = WorkoutPhase.GRACE
                                         isPaused = false
-                                        graceSecondsRemaining = gracePeriodPref
                                         currentStepIndex = 0
-                                        timerSecondsRemaining = 0
-                                        graceEndTimeMs = System.currentTimeMillis() + gracePeriodPref * 1000L
-                                        stepEndTimeMs = 0L
                                         pausedAtMs = 0L
                                         completedWorkSteps.clear()
                                         workoutNote = ""
                                         historySaved = false
+                                        val firstIsTimed = when (val f = workoutSteps.firstOrNull()) {
+                                            is WorkoutStep.Work -> f.durationSeconds > 0
+                                            is WorkoutStep.Rest -> true
+                                            null -> false
+                                        }
+                                        if (firstIsTimed) {
+                                            // Timed/cardio start counting down on their own — give a grace period.
+                                            workoutPhase = WorkoutPhase.GRACE
+                                            graceSecondsRemaining = gracePeriodPref
+                                            graceEndTimeMs = System.currentTimeMillis() + gracePeriodPref * 1000L
+                                            timerSecondsRemaining = 0
+                                            stepEndTimeMs = 0L
+                                        } else {
+                                            // Rep-based first set waits for Mark Complete — go straight to it.
+                                            workoutPhase = WorkoutPhase.RUNNING
+                                            workoutStartTimeMs = System.currentTimeMillis()
+                                            workoutEndTimeMs = 0L
+                                            seedTimer(workoutSteps, 0)
+                                        }
                                     },
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1741,147 +2236,65 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 }
             }
 
-            WorkoutPhase.GRACE -> {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                        .padding(horizontal = 24.dp, vertical = 16.dp)
-                        .semantics { testTag = "screen_grace" },
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = if (isPaused) "Paused" else "Get ready!",
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(Modifier.weight(1f))
-
-                    Text(
-                        text = if (isPaused) "–" else "$graceSecondsRemaining",
-                        style = MaterialTheme.typography.displayLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isPaused) MaterialTheme.colorScheme.onSurfaceVariant
-                                else MaterialTheme.colorScheme.primary,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.semantics { testTag = "grace_countdown" }
-                    )
-                    if (!isPaused) {
-                        Text(
-                            text = "seconds until start",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-
-                    Spacer(Modifier.weight(1f))
-                    HorizontalDivider()
-                    Spacer(Modifier.height(12.dp))
-
-                    Text(
-                        text = "Today's workout",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.height(8.dp))
-
-                    routineEntries.forEachIndexed { index, entry ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 5.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(26.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primaryContainer),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    "${index + 1}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
-                            Column {
-                                Text(
-                                    entry.exerciseName,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                val subtitle = buildList {
-                                    val isTimed = parseWorkDurationSeconds(entry.repsOrDuration) != null
-                                    if (entry.sets.isNotBlank() && !(isTimed && entry.sets == "1")) add("${entry.sets} sets")
-                                    if (entry.repsOrDuration.isNotBlank()) add(formatRepsLabel(entry.repsOrDuration))
-                                    entry.weight?.takeIf { it.isNotBlank() }?.let { add(it) }
-                                    if (entry.warmupSets > 0) add("${entry.warmupSets} warmup")
-                                    if (entry.details.isNotBlank()) add(entry.details)
-                                }.joinToString(" · ")
-                                if (subtitle.isNotBlank()) {
-                                    Text(
-                                        subtitle,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(Modifier.height(24.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = { handlePauseToggle() },
-                            modifier = Modifier
-                                .weight(1f)
-                                .semantics { testTag = "btn_pause_continue" },
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text(if (isPaused) "Continue" else "Pause")
-                        }
-                        OutlinedButton(
-                            onClick = { workoutPhase = WorkoutPhase.EDITING },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Cancel")
-                        }
-                    }
-                }
-            }
-
-            WorkoutPhase.RUNNING -> {
-                val listState = rememberLazyListState()
-                LaunchedEffect(currentStepIndex) {
-                    listState.animateScrollToItem(maxOf(0, currentStepIndex - 1))
-                }
-                val isRepBased = currentStep is WorkoutStep.Work &&
-                    (currentStep as WorkoutStep.Work).durationSeconds == 0
+            WorkoutPhase.GRACE, WorkoutPhase.RUNNING -> {
+                val isGrace = workoutPhase == WorkoutPhase.GRACE
                 val isRestStep = currentStep is WorkoutStep.Rest
+                val currentHasTimer = isRestStep ||
+                    ((currentStep as? WorkoutStep.Work)?.durationSeconds ?: 0) > 0
                 val stepProgress = if (workoutSteps.isNotEmpty())
                     currentStepIndex.toFloat() / workoutSteps.size.toFloat() else 0f
+                // The next work step at/after the current position drives the live card.
+                val upcomingWork = workoutSteps
+                    .drop(currentStepIndex)
+                    .firstOrNull { it is WorkoutStep.Work } as? WorkoutStep.Work
+                val restUpNextName = (currentStep as? WorkoutStep.Rest)?.upNextName
+                val currentIsWarmup = upcomingWork?.isWarmup == true
+                // If the next set uses a different weight than the one just done,
+                // flag it so the user can change plates during the rest.
+                val previousWeight = workoutSteps.take(currentStepIndex)
+                    .lastOrNull { it is WorkoutStep.Work }
+                    ?.let { (it as WorkoutStep.Work).weight }
+                    .orEmpty()
+                val restWeightPrompt = if (isRestStep && upcomingWork != null &&
+                    upcomingWork.weight != previousWeight
+                ) {
+                    upcomingWork.weight.takeIf { it.isNotBlank() } ?: "bodyweight"
+                } else null
+
+                val liveListState = rememberLazyListState()
+                // Keep the active exercise in view.
+                LaunchedEffect(upcomingExerciseIndex) {
+                    if (routineEntries.isNotEmpty()) {
+                        liveListState.animateScrollToItem(
+                            upcomingExerciseIndex.coerceIn(0, routineEntries.lastIndex)
+                        )
+                    }
+                }
+                // Dragging is allowed only for exercises that come after the active one,
+                // so the completed prefix (and the current position) never moves.
+                val liveReorderState = rememberReorderableLazyListState(liveListState) { from, to ->
+                    val fromIdx = from.index
+                    val toIdx = to.index
+                    if (fromIdx > upcomingExerciseIndex && toIdx > upcomingExerciseIndex &&
+                        fromIdx in routineEntries.indices && toIdx in routineEntries.indices
+                    ) {
+                        routineEntries.add(toIdx, routineEntries.removeAt(fromIdx))
+                        entryIds.add(toIdx, entryIds.removeAt(fromIdx))
+                        planVersion++
+                    }
+                }
 
                 Box(modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
-                    .semantics { testTag = "screen_running" }) {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        // Progress bar and step label.
+                    .semantics { testTag = if (isGrace) "screen_grace" else "screen_running" }) {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .widthIn(max = ContentMaxWidth)
+                            .fillMaxWidth()
+                            .fillMaxHeight()
+                    ) {
                         LinearProgressIndicator(
                             progress = { stepProgress },
                             modifier = Modifier.fillMaxWidth(),
@@ -1895,7 +2308,12 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = if (isPaused) "PAUSED" else if (isRestStep) "REST" else "WORKING",
+                                text = when {
+                                    isPaused -> "PAUSED"
+                                    isGrace -> "READY"
+                                    isRestStep -> "REST"
+                                    else -> "WORKING"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = when {
@@ -1911,54 +2329,99 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        // Scrollable workout step timeline.
-                        val exerciseStartIndices = buildSet {
-                            val seen = mutableSetOf<Int>()
-                            workoutSteps.forEachIndexed { i, s ->
-                                if (s is WorkoutStep.Work && seen.add(s.exerciseIndex)) add(i)
-                            }
-                        }
                         LazyColumn(
-                            state = listState,
+                            state = liveListState,
                             modifier = Modifier.weight(1f).fillMaxWidth(),
                             contentPadding = PaddingValues(
-                                start = 16.dp, end = 16.dp, top = 8.dp, bottom = 140.dp
-                            )
+                                start = 16.dp, end = 16.dp, top = 12.dp, bottom = 150.dp
+                            ),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            itemsIndexed(workoutSteps) { index, step ->
-                                WorkoutTimelineItem(
-                                    step = step,
-                                    stepIndex = index,
-                                    currentIndex = currentStepIndex,
-                                    totalSteps = workoutSteps.size,
-                                    timerSeconds = timerSecondsRemaining,
-                                    isPaused = isPaused,
-                                    countUp = countUp,
-                                    onAdjust = {
-                                        if (upcomingExerciseIndex in routineEntries.indices) {
-                                            adjustSheetExIdx = upcomingExerciseIndex
-                                        }
-                                    },
-                                    onMarkComplete = {
-                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        advanceStep()
-                                    },
-                                    onSkip = {
-                                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        advanceStep(recordCompletion = false)
-                                    },
-                                    onCancelExercise = {
-                                        if (upcomingExerciseIndex in routineEntries.indices) {
-                                            cancelExerciseConfirmIdx = upcomingExerciseIndex
-                                        }
-                                    },
-                                    showDoNext = step is WorkoutStep.Work &&
-                                        index in exerciseStartIndices &&
-                                        step.exerciseIndex != upcomingExerciseIndex,
-                                    onDoNext = {
-                                        (step as? WorkoutStep.Work)?.let { doThisNext(it.exerciseIndex) }
-                                    }
-                                )
+                            itemsIndexed(
+                                routineEntries,
+                                key = { index, _ -> entryIds.getOrElse(index) { "$index" } }
+                            ) { index, entry ->
+                                val lastStepOfExercise = workoutSteps.indexOfLast {
+                                    it is WorkoutStep.Work && it.exerciseIndex == index
+                                }
+                                val isDone = lastStepOfExercise >= 0 && lastStepOfExercise < currentStepIndex
+                                val isCurrent = index == upcomingExerciseIndex
+                                ReorderableItem(
+                                    liveReorderState,
+                                    key = entryIds.getOrElse(index) { "$index" }
+                                ) { _ ->
+                                    val canDrag = index > upcomingExerciseIndex && !isDone
+                                    val dragModifier = if (canDrag) {
+                                        Modifier.longPressDraggableHandle(
+                                            onDragStarted = {
+                                                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            }
+                                        )
+                                    } else Modifier
+                                    LiveExerciseCard(
+                                        index = index,
+                                        entry = entry,
+                                        isDone = isDone,
+                                        isCurrent = isCurrent,
+                                        isResting = isCurrent && isRestStep,
+                                        isGrace = isGrace,
+                                        graceSeconds = if (isCurrent && isGrace) graceSecondsRemaining else null,
+                                        isPaused = isPaused,
+                                        setLabel = if (isCurrent && !isRestStep && upcomingWork != null) {
+                                            when {
+                                                upcomingWork.isWarmup ->
+                                                    "Warmup ${upcomingWork.setNumber} of ${upcomingWork.totalSets}"
+                                                upcomingWork.totalSets > 1 ->
+                                                    "Set ${upcomingWork.setNumber} of ${upcomingWork.totalSets}"
+                                                else -> null
+                                            }
+                                        } else null,
+                                        showWarmupBadge = isCurrent && !isRestStep && currentIsWarmup,
+                                        statValue = if (isCurrent && !isRestStep) {
+                                            if ((upcomingWork?.durationSeconds ?: 0) > 0) {
+                                                formatCountdown(timerSecondsRemaining)
+                                            } else {
+                                                upcomingWork?.repsOrDurationLabel?.takeIf { it.isNotBlank() }
+                                            }
+                                        } else null,
+                                        statLabel = if (isCurrent && !isRestStep) {
+                                            if ((upcomingWork?.durationSeconds ?: 0) > 0) "time" else "reps"
+                                        } else null,
+                                        tag = if (isCurrent && !isRestStep && !isGrace) {
+                                            upcomingWork?.tag?.takeIf { it.isNotBlank() }
+                                        } else null,
+                                        weightValue = if (isCurrent && !isRestStep) {
+                                            upcomingWork?.weight?.takeIf { it.isNotBlank() }?.let { weightAmountOf(it) }
+                                        } else null,
+                                        weightUnitLabel = if (isCurrent && !isRestStep) {
+                                            upcomingWork?.weight?.takeIf { it.isNotBlank() }?.let { weightUnitOf(it).label }
+                                        } else null,
+                                        restSeconds = if (isCurrent && isRestStep) timerSecondsRemaining else null,
+                                        restUpNext = if (isCurrent && isRestStep) restUpNextName else null,
+                                        restWeightPrompt = if (isCurrent && isRestStep) restWeightPrompt else null,
+                                        showOptionsMenu = !isCurrent && !isDone && index > upcomingExerciseIndex,
+                                        showTimerAdjust = isCurrent && currentHasTimer,
+                                        dragHandleModifier = dragModifier,
+                                        onMarkComplete = {
+                                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            advanceStep()
+                                        },
+                                        onSkip = {
+                                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            withUndo(if (isRestStep) "Rest skipped" else "Exercise skipped") {
+                                                if (isRestStep) advanceStep(recordCompletion = false)
+                                                else skipRestOfExercise()
+                                            }
+                                        },
+                                        onCancel = { cancelExerciseConfirmIdx = index },
+                                        onAdjust = { adjustSheetExIdx = index },
+                                        onDoNext = { doThisNext(index) },
+                                        onMoveToEnd = { moveEntry(index, routineEntries.lastIndex) },
+                                        onRemove = { cancelExerciseConfirmIdx = index },
+                                        onMinusTen = { adjustStepTime(-10) },
+                                        onPlusTen = { adjustStepTime(10) }
+                                    )
+                                }
                             }
                         }
                     }
@@ -1966,6 +2429,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
+                            .widthIn(max = ContentMaxWidth)
                             .fillMaxWidth()
                             .background(
                                 androidx.compose.ui.graphics.Brush.verticalGradient(
@@ -1983,17 +2447,27 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                 .semantics { testTag = "btn_pause_continue" },
                             shape = RoundedCornerShape(12.dp)
                         ) { Text(if (isPaused) "Continue" else "Pause") }
-                        TextButton(
-                            onClick = { workoutPhase = WorkoutPhase.EDITING },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .semantics { testTag = "btn_end_workout" }
-                        ) {
-                            Text(
-                                "End Workout",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
+                        if (isGrace) {
+                            OutlinedButton(
+                                onClick = { workoutPhase = WorkoutPhase.EDITING },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .semantics { testTag = "btn_cancel_grace" },
+                                shape = RoundedCornerShape(12.dp)
+                            ) { Text("Cancel") }
+                        } else {
+                            TextButton(
+                                onClick = { showEndWorkoutConfirm = true },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .semantics { testTag = "btn_end_workout" }
+                            ) {
+                                Text(
+                                    "End Workout",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
                         }
                     }
                 }
@@ -2177,6 +2651,57 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
         }
     }
 
+    // ── End workout confirmation ──────────────────────────────────────────────
+    if (showEndWorkoutConfirm) {
+        AlertDialog(
+            onDismissRequest = { showEndWorkoutConfirm = false },
+            icon = {
+                Icon(Icons.Rounded.Close, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+            },
+            title = { Text("End workout?") },
+            text = { Text("This session won't be saved. Return to your routine?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showEndWorkoutConfirm = false
+                        endWorkout()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier.semantics { testTag = "btn_confirm_end_workout" }
+                ) { Text("End workout") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showEndWorkoutConfirm = false }) { Text("Keep going") }
+            }
+        )
+    }
+
+    // ── Resume unfinished workout ─────────────────────────────────────────────
+    pendingResumeDraft?.let { draft ->
+        AlertDialog(
+            // Don't discard on outside-tap/back — the user must choose.
+            onDismissRequest = { },
+            icon = { Icon(Icons.Rounded.PlayArrow, contentDescription = null) },
+            title = { Text("Resume workout?") },
+            text = { Text("An unfinished workout was found. Resume where you left off?") },
+            confirmButton = {
+                Button(
+                    onClick = { resumeDraft(draft) },
+                    modifier = Modifier.semantics { testTag = "btn_confirm_resume" }
+                ) { Text("Resume") }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { discardDraftResume() },
+                    modifier = Modifier.semantics { testTag = "btn_discard_resume" }
+                ) { Text("Discard") }
+            }
+        )
+    }
+
     // ── Clear All confirmation dialog ─────────────────────────────────────────
     if (showClearAllDialog) {
         AlertDialog(
@@ -2322,12 +2847,15 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                     restBetweenSetsAmount = if (type == ExerciseType.CARDIO) "" else "90"
                                     isPerSide = false
                                     weightAmount = ""
-                                    weightUnit = WeightUnit.LB
+                                    weightUnit = defaultWeightUnit
                                     warmupEnabled = false
                                     warmupSets = "1"
                                     warmupReps = ""
                                     warmupWeightAmount = ""
-                                    warmupWeightUnit = WeightUnit.LB
+                                    warmupWeightUnit = defaultWeightUnit
+                                    repTag = ""
+                                    perSetEnabled = false
+                                    perSetRows.clear()
                                     errorMessage = null
                                 }
                             },
@@ -2348,7 +2876,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 }
                 OutlinedTextField(
                     value = exerciseName,
-                    onValueChange = { exerciseName = it },
+                    onValueChange = { exerciseName = it; applyRecentDefaults(it) },
                     label = { Text("Exercise") },
                     placeholder = {
                         Text(
@@ -2561,8 +3089,106 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             onAmountChange = { weightAmount = it },
                             unit = weightUnit,
                             onUnitChange = { weightUnit = it },
-                            amountTestTag = "field_weight"
+                            amountTestTag = "field_weight",
+                            unitTestTag = "field_weight_unit"
                         )
+                        RepTagDropdown(
+                            value = repTag,
+                            onValueChange = { repTag = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = "Effort tag (optional)",
+                            testTag = "field_rep_tag"
+                        )
+                        // Optional per-set reps & weight (pyramids, drop sets).
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val next = !perSetEnabled
+                                    perSetEnabled = next
+                                    if (next) syncPerSetRows(sets.toIntOrNull() ?: 0) else perSetRows.clear()
+                                }
+                                .padding(vertical = 4.dp)
+                                .semantics { testTag = "field_perset_toggle" },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Switch(
+                                checked = perSetEnabled,
+                                onCheckedChange = { on ->
+                                    perSetEnabled = on
+                                    if (on) syncPerSetRows(sets.toIntOrNull() ?: 0) else perSetRows.clear()
+                                },
+                                modifier = Modifier.height(28.dp)
+                            )
+                            Column {
+                                Text(
+                                    "Per-set reps & weight",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    if (perSetEnabled) "Leave blank to reuse the values above"
+                                    else "For pyramids and drop sets",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (perSetEnabled) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        if (perSetEnabled) {
+                            val setCount = (sets.toIntOrNull() ?: 0).coerceAtLeast(0)
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                repeat(setCount) { i ->
+                                    val row = perSetRows.getOrNull(i) ?: RoutineSet()
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            "Set ${i + 1}",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.width(48.dp)
+                                        )
+                                        OutlinedTextField(
+                                            value = row.reps.orEmpty(),
+                                            onValueChange = { v ->
+                                                setPerSetRow(i) { it.copy(reps = sanitizeRepsInput(v)) }
+                                            },
+                                            label = { Text("Reps") },
+                                            placeholder = { Text(repsOrDuration.ifBlank { "10" }) },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .semantics { testTag = "field_perset_reps_$i" },
+                                            singleLine = true,
+                                            shape = RoundedCornerShape(12.dp)
+                                        )
+                                        OutlinedTextField(
+                                            value = row.weight.orEmpty(),
+                                            onValueChange = { v ->
+                                                setPerSetRow(i) { it.copy(weight = sanitizeWeightInput(v)) }
+                                            },
+                                            label = { Text("Weight (${weightUnit.label})") },
+                                            placeholder = { Text(weightAmount.ifBlank { "0" }) },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .semantics { testTag = "field_perset_weight_$i" },
+                                            singleLine = true,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                            shape = RoundedCornerShape(12.dp)
+                                        )
+                                        RepTagDropdown(
+                                            value = row.tag.orEmpty(),
+                                            onValueChange = { v -> setPerSetRow(i) { it.copy(tag = v) } },
+                                            modifier = Modifier.weight(0.9f),
+                                            label = "Tag",
+                                            testTag = "field_perset_tag_$i"
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         // Per-side toggle for strength exercises.
                         Row(
                             modifier = Modifier
@@ -2697,6 +3323,14 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                             ExerciseType.STRENGTH -> validateRoutineInput(exerciseName, sets)
                                 ?: validateReps(repsOrDuration)
                                 ?: validateWeight(weightAmount)
+                                ?: if (perSetEnabled) {
+                                    val n = sets.toIntOrNull() ?: 0
+                                    (0 until n).firstNotNullOfOrNull { i ->
+                                        val row = perSetRows.getOrNull(i) ?: RoutineSet()
+                                        validateReps(row.reps.orEmpty())?.let { "Set ${i + 1} reps: $it" }
+                                            ?: validateWeight(row.weight.orEmpty())?.let { "Set ${i + 1} weight: $it" }
+                                    }
+                                } else null
                                 ?: when {
                                     warmupEnabled && (warmupSets.toIntOrNull() == null || warmupSets.toInt() <= 0) ->
                                         "Warmup sets must be a positive number."
@@ -2750,9 +3384,23 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                                 warmupReps = if (isStrength && warmupEnabled)
                                     warmupReps.trim().ifBlank { null } else null,
                                 warmupWeight = if (isStrength && warmupEnabled)
-                                    formatWeight(warmupWeightAmount, warmupWeightUnit) else null
+                                    formatWeight(warmupWeightAmount, warmupWeightUnit) else null,
+                                perSet = if (isStrength && perSetEnabled) {
+                                    val n = sets.toIntOrNull() ?: 0
+                                    (0 until n).map { i ->
+                                        val row = perSetRows.getOrNull(i) ?: RoutineSet()
+                                        RoutineSet(
+                                            reps = row.reps?.trim()?.takeIf { it.isNotBlank() },
+                                            weight = row.weight?.trim()?.takeIf { it.isNotBlank() }
+                                                ?.let { formatWeight(it, weightUnit) },
+                                            tag = row.tag?.takeIf { it.isNotBlank() }
+                                        )
+                                    }.takeIf { list -> list.any { it.reps != null || it.weight != null || it.tag != null } }
+                                } else null,
+                                repTag = if (isStrength) repTag.takeIf { it.isNotBlank() } else null
                             )
                             val idx = editingIndex
+                            rememberRecent(newEntry)
                             if (idx != null) routineEntries[idx] = newEntry
                             else {
                                 routineEntries.add(newEntry)
@@ -2816,20 +3464,20 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     tint = MaterialTheme.colorScheme.error
                 )
             },
-            title = { Text("Cancel exercise?") },
+            title = { Text(if (idx == upcomingExerciseIndex) "Cancel exercise?" else "Remove exercise?") },
             text = { Text("\"$name\" will be removed from this workout.") },
             confirmButton = {
                 Button(
                     onClick = {
                         cancelExerciseConfirmIdx = null
-                        cancelExercise(idx)
+                        withUndo("Exercise removed") { removeExerciseAt(idx) }
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error,
                         contentColor = MaterialTheme.colorScheme.onError
                     ),
                     modifier = Modifier.semantics { testTag = "btn_confirm_cancel_exercise" }
-                ) { Text("Cancel exercise") }
+                ) { Text(if (idx == upcomingExerciseIndex) "Cancel exercise" else "Remove") }
             },
             dismissButton = {
                 OutlinedButton(onClick = { cancelExerciseConfirmIdx = null }) { Text("Keep") }
@@ -2886,29 +3534,27 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                     testTagPrefix = "adjust_sets"
                 )
                 if (isStrengthEntry) {
+                    val setIdx = currentSetIndexFor(adjustIdx)
+                    val displayReps = entry.perSet?.getOrNull(setIdx ?: -1)?.reps
+                        ?.takeIf { it.isNotBlank() } ?: entry.repsOrDuration
                     StepperRow(
-                        label = "Reps",
-                        value = entry.repsOrDuration.ifBlank { "—" },
-                        onDecrement = {
-                            updateCurrentExercise { e -> e.copy(repsOrDuration = shiftReps(e.repsOrDuration, -1)) }
-                        },
-                        onIncrement = {
-                            updateCurrentExercise { e -> e.copy(repsOrDuration = shiftReps(e.repsOrDuration, 1)) }
-                        },
+                        label = if (setIdx != null && !entry.perSet.isNullOrEmpty()) "Reps (this set)" else "Reps",
+                        value = displayReps.ifBlank { "—" },
+                        onDecrement = { adjustRepsForCurrent(-1) },
+                        onIncrement = { adjustRepsForCurrent(1) },
                         testTagPrefix = "adjust_reps"
                     )
                 }
                 if (supportsWeightEntry) {
+                    val setIdx = currentSetIndexFor(adjustIdx)
+                    val displayWeight = entry.perSet?.getOrNull(setIdx ?: -1)?.weight
+                        ?.takeIf { it.isNotBlank() } ?: entry.weight
                     val step = if (entryUnit == WeightUnit.KG) 2.5 else 5.0
                     StepperRow(
                         label = "Weight (${entryUnit.label})",
-                        value = entry.weight ?: "—",
-                        onDecrement = {
-                            updateCurrentExercise { e -> e.copy(weight = shiftWeight(e.weight, -step, entryUnit)) }
-                        },
-                        onIncrement = {
-                            updateCurrentExercise { e -> e.copy(weight = shiftWeight(e.weight, step, entryUnit)) }
-                        },
+                        value = displayWeight ?: "—",
+                        onDecrement = { adjustWeightForCurrent(-step, entryUnit) },
+                        onIncrement = { adjustWeightForCurrent(step, entryUnit) },
                         testTagPrefix = "adjust_weight"
                     )
                 }
@@ -3135,6 +3781,44 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
+                            Icons.Rounded.FitnessCenter,
+                            contentDescription = null,
+                            modifier = Modifier.size(22.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("Weight unit", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "Default unit for new exercises",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        WeightUnit.entries.forEachIndexed { i, unit ->
+                            SegmentedButton(
+                                selected = defaultWeightUnit == unit,
+                                onClick = {
+                                    defaultWeightUnit = unit
+                                    prefs.edit().putString("pref_default_weight_unit", unit.label).apply()
+                                },
+                                shape = SegmentedButtonDefaults.itemShape(i, WeightUnit.entries.size),
+                                modifier = Modifier.semantics { testTag = "switch_weight_unit_${unit.label}" }
+                            ) { Text(unit.label) }
+                        }
+                    }
+                }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
                             Icons.Rounded.Restore,
                             contentDescription = null,
                             modifier = Modifier.size(22.dp),
@@ -3239,7 +3923,7 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         shape = RoundedCornerShape(12.dp),
                         enabled = savedRoutines.isNotEmpty()
                     ) {
-                        Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Rounded.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.size(6.dp))
                         Text("Export")
                     }
@@ -3332,7 +4016,8 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
                         loadSheetState.hide()
                         showLoadSheet = false
                     }
-                }
+                },
+                onDuplicate = { routine -> duplicateRoutine(routine) }
             )
         }
     }
@@ -3343,13 +4028,56 @@ fun RoutineTrackerScreen(onThemeChange: (String) -> Unit = {}) {
             onDismissRequest = { showHistorySheet = false },
             sheetState = historySheetState
         ) {
-            WorkoutHistorySheet(sessions = workoutHistory.toList())
+            WorkoutHistorySheet(
+                sessions = workoutHistory.toList(),
+                onDelete = { id -> deleteHistoryEntry(id) },
+                onClearAll = { clearHistory() },
+                onExport = {
+                    val sdf = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US)
+                    historyExportLauncher.launch("reps_history_${sdf.format(Date())}.json")
+                }
+            )
         }
     }
 }
 
 @Composable
-private fun WorkoutHistorySheet(sessions: List<WorkoutSession>) {
+private fun WorkoutHistorySheet(
+    sessions: List<WorkoutSession>,
+    onDelete: (String) -> Unit,
+    onClearAll: () -> Unit,
+    onExport: () -> Unit
+) {
+    var showClearConfirm by remember { mutableStateOf(false) }
+
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            icon = {
+                Icon(
+                    Icons.Rounded.DeleteOutline,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = { Text("Clear history?") },
+            text = { Text("All ${sessions.size} saved workout${if (sessions.size != 1) "s" else ""} will be permanently deleted.") },
+            confirmButton = {
+                Button(
+                    onClick = { showClearConfirm = false; onClearAll() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier.semantics { testTag = "btn_confirm_clear_history" }
+                ) { Text("Clear all") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showClearConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 40.dp),
@@ -3362,17 +4090,36 @@ private fun WorkoutHistorySheet(sessions: List<WorkoutSession>) {
                     .padding(horizontal = 4.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    "Workout History",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    "${sessions.size} workout${if (sessions.size != 1) "s" else ""}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Workout History",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "${sessions.size} workout${if (sessions.size != 1) "s" else ""}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (sessions.isNotEmpty()) {
+                    IconButton(
+                        onClick = onExport,
+                        modifier = Modifier.semantics { testTag = "btn_export_history" }
+                    ) {
+                        Icon(Icons.Rounded.FileDownload, contentDescription = "Export history")
+                    }
+                    IconButton(
+                        onClick = { showClearConfirm = true },
+                        modifier = Modifier.semantics { testTag = "btn_clear_history" }
+                    ) {
+                        Icon(
+                            Icons.Rounded.DeleteOutline,
+                            contentDescription = "Clear history",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
             }
         }
         if (sessions.isEmpty()) {
@@ -3386,14 +4133,46 @@ private fun WorkoutHistorySheet(sessions: List<WorkoutSession>) {
             }
         } else {
             items(sessions, key = { it.id ?: it.hashCode().toString() }) { session ->
-                WorkoutHistoryCard(session)
+                WorkoutHistoryCard(
+                    session = session,
+                    onDelete = { session.id?.let { onDelete(it) } }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun WorkoutHistoryCard(session: WorkoutSession) {
+private fun WorkoutHistoryCard(session: WorkoutSession, onDelete: () -> Unit) {
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            icon = {
+                Icon(
+                    Icons.Rounded.DeleteOutline,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = { Text("Delete workout?") },
+            text = { Text("This workout will be permanently deleted and cannot be recovered.") },
+            confirmButton = {
+                Button(
+                    onClick = { showDeleteConfirm = false; onDelete() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     val dateStr = SimpleDateFormat("MMM d, yyyy · h:mm a", Locale.getDefault())
         .format(Date(if (session.completedAt > 0L) session.completedAt else System.currentTimeMillis()))
     val volume = buildList {
@@ -3416,6 +4195,18 @@ private fun WorkoutHistoryCard(session: WorkoutSession) {
                         dateStr,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(
+                    onClick = { showDeleteConfirm = true },
+                    modifier = Modifier
+                        .semantics { testTag = "btn_delete_history_entry" }
+                ) {
+                    Icon(
+                        Icons.Rounded.DeleteOutline,
+                        contentDescription = "Delete workout",
+                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
@@ -3589,7 +4380,8 @@ private fun LoadRoutineSheet(
     routines: List<SavedRoutine>,
     onLoad: (SavedRoutine) -> Unit,
     onDelete: (String) -> Unit,
-    onEdit: (SavedRoutine) -> Unit
+    onEdit: (SavedRoutine) -> Unit,
+    onDuplicate: (SavedRoutine) -> Unit
 ) {
     var selectedFilters by remember { mutableStateOf(emptySet<String>()) }
 
@@ -3698,7 +4490,8 @@ private fun LoadRoutineSheet(
                     routine = routine,
                     onLoad = { onLoad(routine) },
                     onDelete = { routine.id?.let { onDelete(it) } },
-                    onEdit = { onEdit(routine) }
+                    onEdit = { onEdit(routine) },
+                    onDuplicate = { onDuplicate(routine) }
                 )
             }
         }
@@ -3710,7 +4503,8 @@ private fun RoutineLibraryCard(
     routine: SavedRoutine,
     onLoad: () -> Unit,
     onDelete: () -> Unit,
-    onEdit: () -> Unit
+    onEdit: () -> Unit,
+    onDuplicate: () -> Unit
 ) {
     val dateStr = routine.savedAt?.let {
         SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(it))
@@ -3740,7 +4534,8 @@ private fun RoutineLibraryCard(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error,
                         contentColor = MaterialTheme.colorScheme.onError
-                    )
+                    ),
+                    modifier = Modifier.semantics { testTag = "btn_confirm_delete_routine" }
                 ) { Text("Delete") }
             },
             dismissButton = {
@@ -3779,16 +4574,43 @@ private fun RoutineLibraryCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                IconButton(
-                    onClick = { showDeleteConfirm = true },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        Icons.Rounded.DeleteOutline,
-                        contentDescription = "Delete routine",
-                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
-                        modifier = Modifier.size(20.dp)
-                    )
+                var menuOpen by remember { mutableStateOf(false) }
+                Box {
+                    IconButton(
+                        onClick = { menuOpen = true },
+                        modifier = Modifier.semantics { testTag = "btn_routine_options" }
+                    ) {
+                        Icon(
+                            Icons.Rounded.MoreVert,
+                            contentDescription = "Routine options",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = menuOpen,
+                        onDismissRequest = { menuOpen = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Duplicate") },
+                            leadingIcon = {
+                                Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+                            },
+                            onClick = { menuOpen = false; onDuplicate() },
+                            modifier = Modifier.semantics { testTag = "btn_duplicate_routine" }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Rounded.DeleteOutline,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            onClick = { menuOpen = false; showDeleteConfirm = true },
+                            modifier = Modifier.semantics { testTag = "btn_delete_routine" }
+                        )
+                    }
                 }
             }
             Row(
@@ -3839,374 +4661,477 @@ private fun RoutineLibraryCard(
 }
 
 @Composable
-private fun WorkoutTimelineItem(
-    step: WorkoutStep,
-    stepIndex: Int,
-    currentIndex: Int,
-    totalSteps: Int,
-    timerSeconds: Int,
+private fun LiveExerciseCard(
+    index: Int,
+    entry: RoutineEntry,
+    isDone: Boolean,
+    isCurrent: Boolean,
+    isResting: Boolean,
     isPaused: Boolean,
-    countUp: Boolean = false,
-    onAdjust: () -> Unit = {},
-    onMarkComplete: () -> Unit = {},
-    onSkip: () -> Unit = {},
-    onCancelExercise: () -> Unit = {},
-    showDoNext: Boolean = false,
-    onDoNext: () -> Unit = {}
+    isGrace: Boolean = false,
+    graceSeconds: Int? = null,
+    setLabel: String?,
+    showWarmupBadge: Boolean,
+    statValue: String?,
+    statLabel: String?,
+    tag: String? = null,
+    weightValue: String?,
+    weightUnitLabel: String?,
+    restSeconds: Int?,
+    restUpNext: String?,
+    restWeightPrompt: String?,
+    showOptionsMenu: Boolean,
+    showTimerAdjust: Boolean,
+    dragHandleModifier: Modifier,
+    onMarkComplete: () -> Unit,
+    onSkip: () -> Unit,
+    onCancel: () -> Unit,
+    onAdjust: () -> Unit,
+    onDoNext: () -> Unit,
+    onMoveToEnd: () -> Unit,
+    onRemove: () -> Unit,
+    onMinusTen: () -> Unit,
+    onPlusTen: () -> Unit
 ) {
-    val isPast    = stepIndex < currentIndex
-    val isCurrent = stepIndex == currentIndex
-    val distance  = (stepIndex - currentIndex).coerceAtLeast(0)
-    val isRest    = step is WorkoutStep.Rest
-
-    val itemAlpha = when {
-        isPast    -> 0.38f
-        isCurrent -> 1.0f
-        distance == 1 -> 0.72f
-        distance == 2 -> 0.55f
-        else          -> 0.40f
-    }
-
-    val accentColor = if (isRest) MaterialTheme.colorScheme.tertiary
-                      else MaterialTheme.colorScheme.primary
-    val lineColor   = MaterialTheme.colorScheme.outlineVariant
-    val bulletSize  = if (isCurrent) 22.dp else 14.dp
-
-    Row(
+    val onContainer = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer
+                      else MaterialTheme.colorScheme.onSurface
+    // Subtle settle when a card is completed; snaps instantly when animations are off.
+    val reduceMotion = !android.animation.ValueAnimator.areAnimatorsEnabled()
+    val doneScale by animateFloatAsState(
+        targetValue = if (isDone) 0.97f else 1f,
+        animationSpec = if (reduceMotion) snap() else tween(durationMillis = 260, easing = FastOutSlowInEasing),
+        label = "doneScale"
+    )
+    val doneAlpha by animateFloatAsState(
+        targetValue = if (isDone) 0.72f else 1f,
+        animationSpec = if (reduceMotion) snap() else tween(durationMillis = 260),
+        label = "doneAlpha"
+    )
+    OutlinedCard(
         modifier = Modifier
             .fillMaxWidth()
-            .height(IntrinsicSize.Min)
-            .alpha(itemAlpha)
-    ) {
-        // Step indicator column: vertical connector line + bullet.
-        Box(
-            modifier = Modifier
-                .width(40.dp)
-                .fillMaxHeight()
-        ) {
-            if (stepIndex > 0) {
-                Box(
-                    modifier = Modifier
-                        .width(2.dp)
-                        .fillMaxHeight(0.5f)
-                        .align(Alignment.TopCenter)
-                        .background(lineColor)
-                )
-            }
-            if (stepIndex < totalSteps - 1) {
-                Box(
-                    modifier = Modifier
-                        .width(2.dp)
-                        .fillMaxHeight(0.5f)
-                        .align(Alignment.BottomCenter)
-                        .background(lineColor)
-                )
-            }
-            when {
-                isPast -> Box(
-                    modifier = Modifier
-                        .size(bulletSize)
-                        .align(Alignment.Center)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Rounded.Check, null,
-                        tint = MaterialTheme.colorScheme.surface,
-                        modifier = Modifier.size(8.dp)
-                    )
-                }
-                isCurrent -> Box(
-                    modifier = Modifier
-                        .size(bulletSize)
-                        .align(Alignment.Center)
-                        .clip(CircleShape)
-                        .background(accentColor)
-                )
-                else -> Box(
-                    modifier = Modifier
-                        .size(bulletSize)
-                        .align(Alignment.Center)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.background)
-                        .border(1.5.dp, lineColor, CircleShape)
-                )
-            }
+            .graphicsLayer {
+                scaleX = doneScale
+                scaleY = doneScale
+                alpha = doneAlpha
+            },
+        shape = RoundedCornerShape(16.dp),
+        colors = when {
+            isDone -> CardDefaults.outlinedCardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+            )
+            isCurrent -> CardDefaults.outlinedCardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+            )
+            else -> CardDefaults.outlinedCardColors()
+        },
+        border = when {
+            isCurrent && showWarmupBadge -> BorderStroke(1.5.dp, WarmupOrange)
+            isCurrent -> BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+            else -> CardDefaults.outlinedCardBorder()
         }
-
-        // Step content: expanded card for the current step, compact label otherwise.
-        if (isCurrent) {
-            when (step) {
-                is WorkoutStep.Work -> ElevatedCard(
-                    modifier = Modifier.weight(1f).padding(start = 8.dp, top = 4.dp, bottom = 14.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp),
-                    colors = CardDefaults.elevatedCardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        if (step.isWarmup) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.padding(bottom = 2.dp)
-                            ) {
-                                Text(
-                                    "WARMUP",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSecondary,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
-                                    letterSpacing = TextUnit(1.5f, TextUnitType.Sp)
-                                )
-                            }
-                        }
-                        if (step.totalSets > 1) {
-                            Text(
-                                if (step.isWarmup) "Warmup ${step.setNumber} of ${step.totalSets}"
-                                else "Set ${step.setNumber} of ${step.totalSets}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.65f)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (showWarmupBadge) {
+                        Modifier.background(
+                            androidx.compose.ui.graphics.Brush.verticalGradient(
+                                0f to Color.Transparent,
+                                0.55f to Color.Transparent,
+                                1f to WarmupOrange.copy(alpha = 0.22f)
                             )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                step.exerciseName,
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .semantics { testTag = "current_exercise_name" }
+                        )
+                    } else Modifier
+                )
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                val handleColor = if (isCurrent) MaterialTheme.colorScheme.primary
+                                  else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                Canvas(modifier = Modifier.size(20.dp).then(dragHandleModifier)) {
+                    val dotRadius = 2.2f * density
+                    val colGap = 5f * density
+                    val rowGap = 4.5f * density
+                    val left = (size.width - colGap) / 2f
+                    val top = (size.height - rowGap * 2f) / 2f
+                    repeat(3) { row ->
+                        repeat(2) { col ->
+                            drawCircle(
+                                color = handleColor,
+                                radius = dotRadius,
+                                center = Offset(left + col * colGap, top + row * rowGap)
                             )
-                            IconButton(
-                                onClick = onAdjust,
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .semantics { testTag = "btn_adjust" }
-                            ) {
-                                Icon(
-                                    Icons.Rounded.Settings,
-                                    contentDescription = "Set settings",
-                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                        }
-                        // Side badge
-                        if (step.side.isNotBlank()) {
-                            val sideColor = if (step.side == "Left")
-                                MaterialTheme.colorScheme.secondary
-                            else
-                                MaterialTheme.colorScheme.tertiary
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = sideColor,
-                                modifier = Modifier.padding(top = 2.dp)
-                            ) {
-                                Text(
-                                    "${step.side.uppercase()} SIDE",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (step.side == "Left")
-                                        MaterialTheme.colorScheme.onSecondary
-                                    else
-                                        MaterialTheme.colorScheme.onTertiary,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                                    letterSpacing = TextUnit(1.5f, TextUnitType.Sp)
-                                )
-                            }
-                        }
-                        if (step.details.isNotBlank()) {
-                            Text(
-                                step.details,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.65f)
-                            )
-                        }
-                        Spacer(Modifier.height(10.dp))
-                        if (step.durationSeconds > 0) {
-                            val displaySeconds = if (countUp) step.durationSeconds - timerSeconds else timerSeconds
-                            val timerLabel = if (countUp) "elapsed / ${formatCountdown(step.durationSeconds)}" else "remaining"
-                            Text(
-                                formatCountdown(displaySeconds),
-                                style = MaterialTheme.typography.displayMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isPaused)
-                                    MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.45f)
-                                else MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.semantics {
-                                    liveRegion = LiveRegionMode.Polite
-                                    contentDescription = "${formatCountdown(displaySeconds)} $timerLabel"
-                                }
-                            )
-                            Text(
-                                timerLabel,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
-                            )
-                        } else {
-                            if (step.repsOrDurationLabel.isNotBlank()) {
-                                Text(
-                                    formatRepsLabel(step.repsOrDurationLabel),
-                                    style = MaterialTheme.typography.displaySmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
-                        }
-                        if (step.weight.isNotBlank()) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                "WEIGHT",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f),
-                                letterSpacing = TextUnit(1.5f, TextUnitType.Sp)
-                            )
-                            Text(
-                                step.weight,
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        }
-                        // Card-level actions for the active step.
-                        Spacer(Modifier.height(6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            TextButton(
-                                onClick = onMarkComplete,
-                                contentPadding = PaddingValues(horizontal = 8.dp),
-                                modifier = Modifier.semantics { testTag = "btn_done" }
-                            ) {
-                                Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.size(4.dp))
-                                Text("Mark Complete")
-                            }
-                            TextButton(
-                                onClick = onSkip,
-                                contentPadding = PaddingValues(horizontal = 8.dp),
-                                modifier = Modifier.semantics { testTag = "btn_skip" }
-                            ) {
-                                Text("Skip")
-                            }
-                            TextButton(
-                                onClick = onCancelExercise,
-                                contentPadding = PaddingValues(horizontal = 8.dp),
-                                colors = ButtonDefaults.textButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.error
-                                ),
-                                modifier = Modifier.semantics { testTag = "btn_cancel_exercise" }
-                            ) {
-                                Text("Cancel")
-                            }
                         }
                     }
                 }
-                is WorkoutStep.Rest -> ElevatedCard(
-                    modifier = Modifier.weight(1f).padding(start = 8.dp, top = 4.dp, bottom = 14.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp),
-                    colors = CardDefaults.elevatedCardColors(
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            "Rest",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.65f)
-                        )
-                        val restDisplaySeconds = if (countUp) step.durationSeconds - timerSeconds else timerSeconds
-                        val restTimerLabel = if (countUp) "elapsed / ${formatCountdown(step.durationSeconds)}" else "remaining"
-                        Text(
-                            formatCountdown(restDisplaySeconds),
-                            style = MaterialTheme.typography.displayMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = if (isPaused)
-                                MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.45f)
-                            else MaterialTheme.colorScheme.onTertiaryContainer,
-                            modifier = Modifier.semantics {
-                                liveRegion = LiveRegionMode.Polite
-                                contentDescription = "Rest: ${formatCountdown(restDisplaySeconds)} $restTimerLabel"
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                isDone -> MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                                isCurrent -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.primaryContainer
                             }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isDone) {
+                        Icon(
+                            Icons.Rounded.Check,
+                            contentDescription = "Complete",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.surface
                         )
-                        if (step.upNextName.isNotBlank()) {
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "UP NEXT",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.6f),
-                                letterSpacing = TextUnit(1.5f, TextUnitType.Sp)
-                            )
-                            Text(
-                                step.upNextName,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                    } else {
+                        Text(
+                            "${index + 1}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isCurrent) MaterialTheme.colorScheme.onPrimary
+                                    else MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        entry.exerciseName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        color = if (isDone) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f) else onContainer,
+                        modifier = if (isCurrent) Modifier.semantics { testTag = "current_exercise_name" } else Modifier
+                    )
+                    val meta = exerciseMeta(entry)
+                    if (meta.isNotBlank()) {
+                        Text(
+                            meta,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isDone) MaterialTheme.colorScheme.onSurfaceVariant
+                                    else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+                if (isCurrent && !isGrace) {
+                    IconButton(
+                        onClick = onAdjust,
+                        modifier = Modifier
+                            .semantics { testTag = "btn_adjust" }
+                    ) {
+                        Icon(
+                            Icons.Rounded.Settings,
+                            contentDescription = "Set settings",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                } else if (showOptionsMenu) {
+                    var menuOpen by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(
+                            onClick = { menuOpen = true },
+                            modifier = Modifier
+                                .semantics { testTag = "btn_exercise_options" }
+                        ) {
+                            Icon(
+                                Icons.Rounded.Settings,
+                                contentDescription = "Exercise options",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Spacer(Modifier.height(6.dp))
+                        DropdownMenu(
+                            expanded = menuOpen,
+                            onDismissRequest = { menuOpen = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Do next") },
+                                leadingIcon = {
+                                    Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = null)
+                                },
+                                onClick = { menuOpen = false; onDoNext() },
+                                modifier = Modifier.semantics { testTag = "btn_do_next" }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Move to end") },
+                                leadingIcon = {
+                                    Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = null)
+                                },
+                                onClick = { menuOpen = false; onMoveToEnd() },
+                                modifier = Modifier.semantics { testTag = "btn_move_to_end" }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Remove", color = MaterialTheme.colorScheme.error) },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Rounded.DeleteOutline,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                },
+                                onClick = { menuOpen = false; onRemove() },
+                                modifier = Modifier.semantics { testTag = "btn_remove_exercise" }
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (isCurrent) {
+                if (graceSeconds != null) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            if (isPaused) "Paused" else "Get ready!",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Text(
+                            if (isPaused) "–" else "$graceSeconds",
+                            style = MaterialTheme.typography.displayLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isPaused) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.45f)
+                                    else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.semantics { testTag = "grace_countdown" }
+                        )
+                        if (!isPaused) {
+                            Text(
+                                "seconds until start",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                            )
+                        }
+                    }
+                } else if (isResting) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            "REST",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.semantics { testTag = "inline_rest_label" }
+                        )
+                        Text(
+                            formatCountdown(restSeconds ?: 0),
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isPaused) MaterialTheme.colorScheme.onSurfaceVariant
+                                    else MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                        )
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            onClick = onSkip,
+                            modifier = Modifier.semantics { testTag = "btn_skip" }
+                        ) { Text("Skip Rest") }
+                        TextButton(
+                            onClick = onCancel,
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            ),
+                            modifier = Modifier.semantics { testTag = "btn_cancel_exercise" }
+                        ) { Text("Cancel") }
+                    }
+                    if (!restUpNext.isNullOrBlank()) {
+                        Text(
+                            "Up next: $restUpNext",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (restWeightPrompt != null) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onAdjust() }
+                                .semantics { testTag = "weight_change_prompt" }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    Icons.Rounded.FitnessCenter,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(20.dp),
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                Column {
+                                    Text(
+                                        "CHANGE WEIGHT",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                                        letterSpacing = TextUnit(1.5f, TextUnitType.Sp)
+                                    )
+                                    Text(
+                                        "Set to $restWeightPrompt",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (showTimerAdjust) {
+                        TimerAdjustRow(onMinusTen = onMinusTen, onPlusTen = onPlusTen)
+                    }
+                } else {
+                    if (showWarmupBadge) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = WarmupOrange
+                        ) {
+                            Text(
+                                "WARMUP",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                                letterSpacing = TextUnit(1.5f, TextUnitType.Sp)
+                            )
+                        }
+                    }
+                    if (setLabel != null) {
+                        Text(
+                            setLabel,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                    if (!tag.isNullOrBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.tertiaryContainer
+                        ) {
+                            Text(
+                                tag,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier
+                                    .padding(horizontal = 10.dp, vertical = 3.dp)
+                                    .semantics { testTag = "current_set_tag" }
+                            )
+                        }
+                    }
+                    // Big, centered set info: e.g. "12 reps | 70 lb".
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                statValue ?: "—",
+                                style = MaterialTheme.typography.headlineLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.semantics {
+                                    testTag = "set_value"
+                                    contentDescription = listOfNotNull(statValue, statLabel).joinToString(" ")
+                                }
+                            )
+                            if (statLabel != null) {
+                                Text(
+                                    statLabel,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f),
+                                    modifier = Modifier.semantics { testTag = "set_label" }
+                                )
+                            }
+                        }
+                        if (weightValue != null) {
+                            Box(
+                                modifier = Modifier
+                                    .width(1.dp)
+                                    .height(44.dp)
+                                    .background(MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.3f))
+                            )
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    weightValue,
+                                    style = MaterialTheme.typography.headlineLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.semantics {
+                                        testTag = "weight_value"
+                                        contentDescription = listOfNotNull(weightValue, weightUnitLabel).joinToString(" ")
+                                    }
+                                )
+                                if (weightUnitLabel != null) {
+                                    Text(
+                                        weightUnitLabel,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f),
+                                        modifier = Modifier.semantics { testTag = "weight_unit" }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (showTimerAdjust) {
+                        TimerAdjustRow(onMinusTen = onMinusTen, onPlusTen = onPlusTen)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        TextButton(
+                            onClick = onMarkComplete,
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier.semantics { testTag = "btn_done" }
+                        ) {
+                            Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.size(4.dp))
+                            Text("Mark Complete")
+                        }
                         TextButton(
                             onClick = onSkip,
                             contentPadding = PaddingValues(horizontal = 8.dp),
                             modifier = Modifier.semantics { testTag = "btn_skip" }
-                        ) {
-                            Text("Skip Rest")
-                        }
+                        ) { Text("Skip") }
+                        TextButton(
+                            onClick = onCancel,
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            ),
+                            modifier = Modifier.semantics { testTag = "btn_cancel_exercise" }
+                        ) { Text("Cancel") }
                     }
-                }
-            }
-        } else {
-            // Compact past / future row
-            val label = when (step) {
-                is WorkoutStep.Work -> buildString {
-                    if (step.isWarmup) append("Warmup · ")
-                    append(step.exerciseName)
-                    if (step.totalSets > 1) append(" · Set ${step.setNumber}/${step.totalSets}")
-                    if (step.side.isNotBlank()) append(" · ${step.side}")
-                    if (step.repsOrDurationLabel.isNotBlank()) append(" · ${formatRepsLabel(step.repsOrDurationLabel)}")
-                    if (step.weight.isNotBlank()) append(" · ${step.weight}")
-                }
-                is WorkoutStep.Rest -> buildString {
-                    append("Rest · ${formatDuration(step.durationSeconds)}")
-                    if (step.upNextName.isNotBlank()) append(" · then ${step.upNextName}")
-                }
-            }
-            Text(
-                label,
-                style = if (!isPast && distance == 1) MaterialTheme.typography.bodyMedium
-                        else MaterialTheme.typography.bodySmall,
-                color = if (isRest && !isPast) MaterialTheme.colorScheme.tertiary
-                        else MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 10.dp, top = 10.dp, bottom = 10.dp, end = 4.dp)
-            )
-            if (showDoNext && !isPast && !isCurrent) {
-                TextButton(
-                    onClick = onDoNext,
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                    modifier = Modifier
-                        .align(Alignment.CenterVertically)
-                        .semantics { testTag = "btn_do_next" }
-                ) {
-                    Text("Do next", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
@@ -4332,6 +5257,49 @@ private fun RestDurationInput(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun RepTagDropdown(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    label: String = "Tag",
+    testTag: String = ""
+) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = !expanded },
+        modifier = modifier
+    ) {
+        OutlinedTextField(
+            value = value.ifBlank { "None" },
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(label) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true)
+                .fillMaxWidth()
+                .then(if (testTag.isNotEmpty()) Modifier.semantics { this.testTag = testTag } else Modifier),
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp)
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text("None") },
+                onClick = { onValueChange(""); expanded = false }
+            )
+            repTagOptions.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = { onValueChange(option); expanded = false }
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun WeightInput(
     modifier: Modifier = Modifier,
     label: String,
@@ -4339,7 +5307,8 @@ private fun WeightInput(
     onAmountChange: (String) -> Unit,
     unit: WeightUnit,
     onUnitChange: (WeightUnit) -> Unit,
-    amountTestTag: String = ""
+    amountTestTag: String = "",
+    unitTestTag: String = ""
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -4376,7 +5345,10 @@ private fun WeightInput(
                     trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
                     modifier = Modifier
                         .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        .then(
+                            if (unitTestTag.isNotEmpty()) Modifier.semantics { testTag = unitTestTag } else Modifier
+                        ),
                     singleLine = true,
                     shape = RoundedCornerShape(12.dp)
                 )
@@ -4396,6 +5368,32 @@ private fun WeightInput(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TimerAdjustRow(
+    onMinusTen: () -> Unit,
+    onPlusTen: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedButton(
+            onClick = onMinusTen,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.semantics { testTag = "btn_minus_10" }
+        ) { Text("− 10s", style = MaterialTheme.typography.labelLarge) }
+        OutlinedButton(
+            onClick = onPlusTen,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.semantics { testTag = "btn_plus_10" }
+        ) { Text("+ 10s", style = MaterialTheme.typography.labelLarge) }
     }
 }
 
